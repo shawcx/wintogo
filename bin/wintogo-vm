@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+#
+# wintogo-vm - boot a Windows To Go image (or real drive) in QEMU as a USB disk.
+#
+# The disk is attached as USB mass storage on an xHCI controller and booted by
+# OVMF with Secure Boot enforced and Microsoft's keys enrolled, which is how a
+# real PC sees the drive.
+#
+# By default the image itself is never modified: the VM writes to a qcow2
+# overlay next to it (<image>.overlay.qcow2), which is kept between runs so
+# Windows' first-boot setup only happens once. --reset discards it; --write
+# writes straight into the image instead.
+#
+# Other devices are emulated hardware Windows has drivers for (std VGA,
+# e1000e NIC, USB tablet). --virtio switches display, network, input, memory
+# balloon and RNG to virtio instead, which is faster but needs the virtio-win
+# drivers in Windows:
+#   - virtio-vga falls back to a plain framebuffer, and a USB tablet stays as
+#     a fallback mouse, so the VM is usable before drivers are installed;
+#   - the virtio-win driver ISO is attached as a CD when found (--virtio-win);
+#   - while booting from USB, a small "primer" virtio disk is attached so that
+#     installing the drivers also binds the virtio storage driver. Windows can
+#     only boot from a virtio disk (--disk virtio) after that has happened.
+
+set -euo pipefail
+
+PROG=${0##*/}
+MEMORY=6G
+CPUS=4
+SECURE_BOOT=1
+MODE=overlay        # overlay | write | snapshot
+RESET=0
+DISPLAY_OPT=()
+VIRTIO=0
+DISK_BUS=usb
+VIRTIO_WIN=${VIRTIO_WIN:-}
+VIRTIO_WIN_URL=https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso
+
+usage() {
+    cat <<EOF
+Usage: $PROG [options] <image-or-device> [-- extra qemu args]
+
+Boot a Windows To Go image file (or a real drive such as /dev/sdb, which
+needs root) in QEMU, attached as a USB disk.
+
+Options:
+  -m, --memory SIZE     guest RAM (default: $MEMORY)
+  -c, --cpus N          vCPUs (default: $CPUS)
+      --reset           discard the saved overlay and start from the image
+                        as built (first-boot setup runs again)
+  -w, --write           write changes into the image/drive itself
+  -s, --snapshot        throw all changes away when the VM exits
+  -n, --no-secure-boot  boot with Secure Boot off
+      --virtio          use virtio display, network, input, balloon and RNG
+                        devices (needs the virtio-win drivers in Windows)
+      --disk BUS        attach the Windows disk as 'usb' (default) or 'virtio'
+                        (faster; needs the virtio storage driver already bound,
+                        see below)
+      --virtio-win ISO  with --virtio: attach this virtio-win driver ISO as a
+                        CD (default: found in /usr/share/virtio-win or
+                        ~/Downloads)
+      --headless        no window; connect a VNC viewer to localhost:5900
+  -h, --help            show this help
+
+Environment: OVMF_CODE, OVMF_VARS override the firmware files; VIRTIO_WIN
+sets the driver ISO.
+
+Driver ISO: $VIRTIO_WIN_URL
+In Windows, run virtio-win-guest-tools.exe from the CD to install them all.
+Windows only boots from a virtio disk once its storage driver has been bound
+to one: with --virtio and a USB disk, a small spare virtio disk is attached
+for that, so boot once that way after installing the drivers, then use
+--disk virtio.
+EOF
+}
+
+die() { echo "$PROG: error: $*" >&2; exit 1; }
+log() { echo "==> $*" >&2; }
+
+args=() extra=()
+while (($#)); do
+    case $1 in
+        -m|--memory)         MEMORY=${2:?}; shift ;;
+        -c|--cpus)           CPUS=${2:?}; shift ;;
+        --reset)             RESET=1 ;;
+        -w|--write)          MODE=write ;;
+        -s|--snapshot)       MODE=snapshot ;;
+        -n|--no-secure-boot) SECURE_BOOT=0 ;;
+        --disk)              DISK_BUS=${2:?}; shift ;;
+        --virtio-win)        VIRTIO_WIN=${2:?}; shift ;;
+        --virtio)            VIRTIO=1 ;;
+        --headless)          DISPLAY_OPT=(-display none -vnc :0) ;;
+        -h|--help)           usage; exit 0 ;;
+        --)                  shift; extra=("$@"); break ;;
+        -*)                  die "unknown option: $1 (see --help)" ;;
+        *)                   args+=("$1") ;;
+    esac
+    shift
+done
+((${#args[@]} == 1)) || { usage >&2; exit 2; }
+DISK=$(readlink -f "${args[0]}")
+
+[[ -f $DISK || -b $DISK ]] || die "not found: ${args[0]}"
+[[ -r $DISK ]] || die "no read access to $DISK (run as root?)"
+[[ $CPUS =~ ^[1-9][0-9]*$ ]] || die "invalid cpu count: $CPUS"
+[[ $DISK_BUS == usb || $DISK_BUS == virtio ]] || die "--disk must be usb or virtio"
+command -v qemu-system-x86_64 >/dev/null || die "qemu-system-x86_64 not found (sudo apt install qemu-system-x86)"
+if [[ -b $DISK ]] && lsblk -no MOUNTPOINTS "$DISK" | grep -q .; then
+    die "$DISK has mounted filesystems; unmount them first"
+fi
+
+# ------------------------------------------------------------------ firmware
+
+if ((SECURE_BOOT)); then
+    candidates=(
+        /usr/share/OVMF/OVMF_CODE_4M.secboot.fd:/usr/share/OVMF/OVMF_VARS_4M.ms.fd
+        /usr/share/edk2/ovmf/OVMF_CODE.secboot.fd:/usr/share/edk2/ovmf/OVMF_VARS.secboot.fd
+    )
+else
+    candidates=(
+        /usr/share/OVMF/OVMF_CODE_4M.fd:/usr/share/OVMF/OVMF_VARS_4M.fd
+        /usr/share/edk2/ovmf/OVMF_CODE.fd:/usr/share/edk2/ovmf/OVMF_VARS.fd
+    )
+fi
+if [[ -z ${OVMF_CODE:-} || -z ${OVMF_VARS:-} ]]; then
+    for pair in "${candidates[@]}"; do
+        if [[ -f ${pair%%:*} && -f ${pair##*:} ]]; then
+            OVMF_CODE=${pair%%:*} OVMF_VARS=${pair##*:}
+            break
+        fi
+    done
+fi
+[[ -f ${OVMF_CODE:-} && -f ${OVMF_VARS:-} ]] || die "OVMF firmware not found (sudo apt install ovmf)"
+
+# ------------------------------------------------------------------ disk + state
+
+# State lives next to an image file; for a device (or --snapshot) use a
+# throwaway directory.
+if [[ -f $DISK && $MODE != snapshot ]]; then
+    STATE_BASE=$DISK
+    TMP=
+else
+    TMP=$(mktemp -d "${TMPDIR:-/tmp}/wintogo-vm.XXXXXX")
+    STATE_BASE=$TMP/vm
+fi
+trap 'if [[ -n $TMP ]]; then rm -rf "$TMP"; fi' EXIT
+
+OVERLAY=$STATE_BASE.overlay.qcow2
+VARS=$STATE_BASE.vars.fd
+
+# --reset always clears the state saved next to an image, whatever mode
+# this run uses.
+if ((RESET)) && [[ -f $DISK ]]; then
+    rm -f "$DISK.overlay.qcow2" "$DISK.vars.fd" "$DISK.primer.qcow2"
+    log "discarded saved VM state"
+fi
+# Firmware variables (boot entries) persist alongside the overlay; they must
+# match the Secure Boot setting they were created with.
+[[ -f $VARS ]] || cp "$OVMF_VARS" "$VARS"
+
+case $MODE in
+    overlay)
+        if [[ -f $OVERLAY ]]; then
+            log "resuming from $OVERLAY (use --reset to start over)"
+        else
+            qemu-img create -q -f qcow2 -b "$DISK" -F raw "$OVERLAY"
+            log "changes go to $OVERLAY; $DISK is not modified"
+        fi
+        drive="file=$OVERLAY,format=qcow2"
+        ;;
+    write)
+        [[ -w $DISK ]] || die "no write access to $DISK"
+        [[ -f $OVERLAY ]] && die "$OVERLAY exists; --write would bypass it. Use --reset first."
+        log "writing directly to $DISK"
+        drive="file=$DISK,format=raw"
+        ;;
+    snapshot)
+        log "snapshot mode: changes are discarded on exit"
+        drive="file=$DISK,format=raw,snapshot=on"
+        ;;
+esac
+
+# ------------------------------------------------------------------ devices
+
+if [[ $DISK_BUS == usb ]]; then
+    disk_dev=(-device usb-storage,bus=xhci.0,drive=stick,bootindex=0)
+else
+    disk_dev=(-device virtio-blk-pci,drive=stick,bootindex=0)
+    log "Windows disk on virtio: if it stops with INACCESSIBLE_BOOT_DEVICE, boot once"
+    log "  with --virtio over USB (drivers installed), then try --disk virtio again"
+fi
+
+if ((VIRTIO)); then
+    devices=(
+        -vga none -device virtio-vga
+        -netdev user,id=net0 -device virtio-net-pci,netdev=net0
+        -device virtio-keyboard-pci -device virtio-tablet-pci
+        -device usb-tablet,bus=xhci.0            # mouse until drivers are installed
+        -device virtio-balloon-pci
+        -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-pci,rng=rng0
+    )
+    if [[ $DISK_BUS == usb ]]; then
+        PRIMER=$STATE_BASE.primer.qcow2
+        [[ -f $PRIMER ]] || qemu-img create -q -f qcow2 "$PRIMER" 64M
+        devices+=(-drive "if=none,id=primer,file=$PRIMER,format=qcow2"
+                  -device virtio-blk-pci,drive=primer)
+    fi
+
+    if [[ -z $VIRTIO_WIN ]]; then
+        for candidate in /usr/share/virtio-win/virtio-win.iso "$HOME"/Downloads/virtio-win*.iso; do
+            [[ -f $candidate ]] && VIRTIO_WIN=$candidate
+        done
+    fi
+    if [[ -n $VIRTIO_WIN ]]; then
+        [[ -f $VIRTIO_WIN ]] || die "virtio-win ISO not found: $VIRTIO_WIN"
+        # AHCI CD-ROM: Windows has inbox drivers for it.
+        devices+=(-drive "if=none,id=drivers,media=cdrom,readonly=on,file=$VIRTIO_WIN"
+                  -device ide-cd,drive=drivers,bus=ide.2)
+        log "virtio drivers: $VIRTIO_WIN (attached as a CD)"
+    else
+        log "no virtio-win ISO found: Windows will have no network until its drivers are"
+        log "  installed. Download $VIRTIO_WIN_URL"
+        log "  to ~/Downloads if they aren't installed yet."
+    fi
+else
+    devices=(-vga std -nic user,model=e1000e -device usb-tablet,bus=xhci.0)
+fi
+
+# ------------------------------------------------------------------ launch
+
+machine=(-machine q35,smm=on)
+((SECURE_BOOT)) && machine+=(-global driver=cfi.pflash01,property=secure,value=on)
+if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+    machine+=(-enable-kvm -cpu host)
+else
+    echo "WARNING: /dev/kvm not accessible; Windows will be very slow" >&2
+fi
+
+log "booting $DISK as a $DISK_BUS disk (secure boot: $( ((SECURE_BOOT)) && echo on || echo off ), devices: $( ((VIRTIO)) && echo virtio || echo emulated ))"
+[[ ${#DISPLAY_OPT[@]} -eq 0 ]] || log "headless: connect a VNC viewer to localhost:5900"
+
+qemu-system-x86_64 \
+    "${machine[@]}" \
+    -smp "$CPUS" -m "$MEMORY" \
+    -drive if=pflash,format=raw,unit=0,readonly=on,file="$OVMF_CODE" \
+    -drive if=pflash,format=raw,unit=1,file="$VARS" \
+    -device qemu-xhci,id=xhci \
+    -drive "if=none,id=stick,$drive" \
+    "${disk_dev[@]}" \
+    "${devices[@]}" \
+    -rtc base=localtime \
+    "${DISPLAY_OPT[@]}" \
+    "${extra[@]}"

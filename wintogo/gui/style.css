@@ -1,0 +1,158 @@
+/* wintogo — light theme (dark overrides are in style-dark.css) */
+
+@define-color brand_start #3d63f5;
+@define-color brand_end #8b5cf6;
+
+@define-color accent_bg_color #3d63f5;
+@define-color accent_color #2e54e0;
+@define-color accent_fg_color #ffffff;
+
+@define-color window_bg_color #f5f6fa;
+@define-color view_bg_color #ffffff;
+@define-color card_bg_color #ffffff;
+@define-color headerbar_bg_color #f5f6fa;
+@define-color headerbar_shade_color transparent;
+
+window, dialog, popover {
+  font-family: "Inter", "Ubuntu Sans", "Cantarell", "Noto Sans", sans-serif;
+}
+
+/* ---------------------------------------------------------------- hero */
+
+.hero-icon {
+  background-image: linear-gradient(135deg, @brand_start, @brand_end);
+  color: white;
+  border-radius: 20px;
+  min-width: 68px;
+  min-height: 68px;
+  box-shadow: 0 8px 22px alpha(@brand_start, 0.35);
+}
+
+.hero-title {
+  font-size: 24pt;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+}
+
+.hero-subtitle {
+  font-size: 11.5pt;
+  opacity: 0.68;
+}
+
+/* ---------------------------------------------------------------- sections */
+
+.step-badge {
+  background-image: linear-gradient(135deg, @brand_start, @brand_end);
+  color: white;
+  border-radius: 999px;
+  min-width: 26px;
+  min-height: 26px;
+  font-size: 10pt;
+  font-weight: 800;
+}
+
+.section-title {
+  font-size: 13.5pt;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+}
+
+.section-description {
+  font-size: 10pt;
+  opacity: 0.62;
+}
+
+.boxed-list {
+  border: none;
+  box-shadow: 0 1px 2px alpha(black, 0.05),
+              0 6px 22px alpha(black, 0.06),
+              0 0 0 1px alpha(black, 0.04);
+}
+
+row.warning-row {
+  background-color: alpha(@warning_color, 0.10);
+  color: @warning_fg_color;
+}
+row.warning-row .title { color: @warning_color; font-weight: 600; }
+
+/* ---------------------------------------------------------------- action bar */
+
+.action-bar {
+  background-color: alpha(@window_bg_color, 0.96);
+  border-top: 1px solid alpha(currentColor, 0.07);
+}
+
+.install-button {
+  background-image: linear-gradient(135deg, @brand_start, @brand_end);
+  color: white;
+  font-weight: 700;
+  font-size: 11.5pt;
+  padding: 10px 28px;
+  border-radius: 999px;
+  box-shadow: 0 6px 18px alpha(@brand_start, 0.32);
+}
+.install-button:hover { filter: brightness(1.07); }
+.install-button:active { filter: brightness(0.94); }
+.install-button:disabled {
+  background-image: none;
+  background-color: alpha(currentColor, 0.10);
+  color: alpha(@window_fg_color, 0.45);
+  box-shadow: none;
+}
+
+.cancel-button {
+  border-radius: 999px;
+  padding: 10px 22px;
+  font-weight: 600;
+}
+
+.progress-card {
+  background-color: @card_bg_color;
+  border-radius: 16px;
+  padding: 14px 16px 12px 16px;
+  box-shadow: 0 1px 2px alpha(black, 0.05),
+              0 6px 22px alpha(black, 0.07),
+              0 0 0 1px alpha(black, 0.04);
+}
+
+.percent {
+  font-size: 22pt;
+  font-weight: 800;
+  font-feature-settings: "tnum";
+  letter-spacing: -0.5px;
+}
+.percent.success { color: @success_color; }
+.percent.error { color: @error_color; }
+
+.status {
+  font-weight: 600;
+}
+.status-detail {
+  font-size: 10pt;
+  opacity: 0.65;
+  font-feature-settings: "tnum";
+}
+
+progressbar.big trough,
+progressbar.big progress {
+  min-height: 8px;
+  border-radius: 999px;
+}
+progressbar.big trough { background-color: alpha(currentColor, 0.10); }
+progressbar.big progress {
+  background-image: linear-gradient(90deg, @brand_start, @brand_end);
+  border: none;
+}
+progressbar.big.success progress { background-image: none; background-color: @success_color; }
+progressbar.big.error progress { background-image: none; background-color: @error_color; }
+
+.log, .log text {
+  font-family: "Ubuntu Sans Mono", "JetBrains Mono", monospace;
+  font-size: 9.5pt;
+  background-color: transparent;
+}
+.log-frame {
+  background-color: alpha(currentColor, 0.04);
+  border-radius: 10px;
+  padding: 6px 8px;
+}

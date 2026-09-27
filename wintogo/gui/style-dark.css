@@ -1,0 +1,24 @@
+/* wintogo — dark overrides, loaded on top of style.css */
+
+@define-color brand_start #5b7cfa;
+@define-color brand_end #a07bff;
+
+@define-color accent_bg_color #5b7cfa;
+@define-color accent_color #93a9ff;
+
+@define-color window_bg_color #14161c;
+@define-color view_bg_color #1d2029;
+@define-color card_bg_color #1d2029;
+@define-color headerbar_bg_color #14161c;
+@define-color dialog_bg_color #1f222c;
+@define-color popover_bg_color #242834;
+
+.boxed-list,
+.progress-card {
+  box-shadow: 0 1px 2px alpha(black, 0.30),
+              0 8px 26px alpha(black, 0.28),
+              0 0 0 1px alpha(white, 0.05);
+}
+
+.hero-icon { box-shadow: 0 8px 26px alpha(@brand_start, 0.30); }
+.install-button { box-shadow: 0 6px 20px alpha(@brand_start, 0.28); }
