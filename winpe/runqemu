@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+#
+# runqemu - boot a WinPE USB image (or a real USB stick) in QEMU.
+#
+# The image is attached as a USB mass-storage device on an xHCI controller and
+# booted with OVMF (UEFI), by default with Secure Boot enforced and Microsoft's
+# keys enrolled, which is close to how real hardware sees the stick. Writes go
+# to a throwaway snapshot unless --write is given.
+
+set -euo pipefail
+
+PROG=${0##*/}
+MEMORY=4G
+CPUS=2
+SECURE_BOOT=1
+SNAPSHOT=on
+DISPLAY_OPT=()
+
+usage() {
+    cat <<EOF
+Usage: $PROG [options] [image]
+
+Boot a WinPE USB image in QEMU with UEFI firmware. [image] defaults to
+winpe.img and may also be a block device such as /dev/sdb (needs root).
+
+Options:
+  -m, --memory SIZE    guest RAM (default: $MEMORY; WinPE runs from RAM,
+                       so give it at least 2G)
+  -c, --cpus N         number of vCPUs (default: $CPUS)
+  -n, --no-secure-boot boot with Secure Boot disabled
+  -w, --write          write guest changes back to the image (default is a
+                       throwaway snapshot)
+      --headless       no window; attach with a VNC viewer on :5900
+  -h, --help           show this help
+
+Environment:
+  OVMF_CODE, OVMF_VARS override the firmware files used
+EOF
+}
+
+die() { echo "$PROG: error: $*" >&2; exit 1; }
+log() { echo "==> $*" >&2; }
+
+args=()
+while (($#)); do
+    case $1 in
+        -m|--memory)         MEMORY=${2:?}; shift ;;
+        -c|--cpus)           CPUS=${2:?}; shift ;;
+        -n|--no-secure-boot) SECURE_BOOT=0 ;;
+        -w|--write)          SNAPSHOT=off ;;
+        --headless)          DISPLAY_OPT=(-display none -vnc :0) ;;
+        -h|--help)           usage; exit 0 ;;
+        --)                  shift; args+=("$@"); break ;;
+        -*)                  die "unknown option: $1 (see --help)" ;;
+        *)                   args+=("$1") ;;
+    esac
+    shift
+done
+((${#args[@]} <= 1)) || { usage >&2; exit 2; }
+IMAGE=${args[0]:-winpe.img}
+
+[[ -f $IMAGE || -b $IMAGE ]] || die "image not found: $IMAGE"
+[[ -r $IMAGE ]] || die "no read access to $IMAGE (run as root?)"
+[[ $SNAPSHOT == on || -w $IMAGE ]] || die "no write access to $IMAGE"
+[[ $CPUS =~ ^[1-9][0-9]*$ ]] || die "invalid cpu count: $CPUS"
+command -v qemu-system-x86_64 >/dev/null || die "missing required command: qemu-system-x86_64"
+
+if [[ -b $IMAGE ]] && lsblk -no MOUNTPOINTS "$IMAGE" | grep -q .; then
+    die "$IMAGE has mounted filesystems; unmount them first"
+fi
+
+# ------------------------------------------------------------------ firmware
+
+# Candidate CODE:VARS pairs, Debian/Ubuntu first, then Fedora. The Secure Boot
+# VARS templates must have Microsoft's keys enrolled or bootmgr won't load.
+if ((SECURE_BOOT)); then
+    candidates=(
+        /usr/share/OVMF/OVMF_CODE_4M.secboot.fd:/usr/share/OVMF/OVMF_VARS_4M.ms.fd
+        /usr/share/edk2/ovmf/OVMF_CODE.secboot.fd:/usr/share/edk2/ovmf/OVMF_VARS.secboot.fd
+    )
+else
+    candidates=(
+        /usr/share/OVMF/OVMF_CODE_4M.fd:/usr/share/OVMF/OVMF_VARS_4M.fd
+        /usr/share/edk2/ovmf/OVMF_CODE.fd:/usr/share/edk2/ovmf/OVMF_VARS.fd
+    )
+fi
+
+if [[ -n ${OVMF_CODE:-} || -n ${OVMF_VARS:-} ]]; then
+    [[ -n ${OVMF_CODE:-} && -n ${OVMF_VARS:-} ]] || die "set both OVMF_CODE and OVMF_VARS"
+else
+    for pair in "${candidates[@]}"; do
+        if [[ -f ${pair%%:*} && -f ${pair##*:} ]]; then
+            OVMF_CODE=${pair%%:*}
+            OVMF_VARS=${pair##*:}
+            break
+        fi
+    done
+    [[ -n ${OVMF_CODE:-} ]] || die "OVMF firmware not found (install ovmf, or set OVMF_CODE/OVMF_VARS)"
+fi
+[[ -f $OVMF_CODE ]] || die "firmware not found: $OVMF_CODE"
+[[ -f $OVMF_VARS ]] || die "firmware not found: $OVMF_VARS"
+
+# OVMF writes to its variable store, so give each run a private copy.
+VARS_COPY=$(mktemp "${TMPDIR:-/tmp}/runqemu-vars.XXXXXX")
+trap 'rm -f "$VARS_COPY"' EXIT
+cp "$OVMF_VARS" "$VARS_COPY"
+
+# -------------------------------------------------------------------- launch
+
+accel=(-machine q35,smm=on)
+if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+    accel+=(-enable-kvm -cpu host)
+else
+    echo "WARNING: /dev/kvm not accessible; falling back to slow emulation" >&2
+fi
+
+if ((SECURE_BOOT)); then
+    accel+=(-global driver=cfi.pflash01,property=secure,value=on)
+fi
+
+log "booting $IMAGE (secure boot: $( ((SECURE_BOOT)) && echo on || echo off ), snapshot: $SNAPSHOT)"
+log "firmware: $OVMF_CODE"
+[[ ${#DISPLAY_OPT[@]} -eq 0 ]] || log "headless: connect a VNC viewer to localhost:5900"
+
+qemu-system-x86_64 \
+    "${accel[@]}" \
+    -smp "$CPUS" -m "$MEMORY" \
+    -drive if=pflash,format=raw,unit=0,readonly=on,file="$OVMF_CODE" \
+    -drive if=pflash,format=raw,unit=1,file="$VARS_COPY" \
+    -device qemu-xhci \
+    -drive if=none,id=stick,file="$IMAGE",format=raw,snapshot="$SNAPSHOT" \
+    -device usb-storage,drive=stick,bootindex=0 \
+    -device usb-tablet \
+    -nic user,model=e1000e \
+    "${DISPLAY_OPT[@]}"
