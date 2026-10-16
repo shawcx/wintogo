@@ -7,8 +7,8 @@ import tempfile
 from pathlib import Path
 
 from . import bootfiles, customize, disks, iso, wim
-from .target import ESP_MIB, MIB, MSR_MIB, DeviceTarget, ImageTarget
-from .util import WinToGoError, require
+from .target import ESP_MIB, MIB, MSR_MIB, DeviceTarget, ImageTarget, StagedDeviceTarget
+from .util import IS_MACOS, WinToGoError, require
 
 GIB = 1 << 30
 # Room on top of the applied files for the pagefile, first-boot setup,
@@ -16,14 +16,18 @@ GIB = 1 << 30
 HEADROOM = 8 * GIB
 RECOMMENDED_MIN = 64 * 1000**3
 
-REQUIRED_COMMANDS = ("7z", "wimlib-imagex", "sgdisk", "mkfs.vfat", "mcopy", "mkntfs", "ntfscat", "ntfscp")
+REQUIRED_COMMANDS = ("wimlib-imagex", "sgdisk", "mkfs.vfat", "mcopy", "mkntfs", "ntfscat", "ntfscp")
+# macOS attaches the ISO itself; Linux reads it with 7z unless running as root.
+REQUIRED_COMMANDS += ("diskutil",) if IS_MACOS else ("7z",)
 
 
-def is_block_device(path):
+def is_device(path):
+    """A disk node: a block device, or on macOS also its raw /dev/rdiskN twin."""
     try:
-        return stat.S_ISBLK(os.stat(path).st_mode)
+        mode = os.stat(path).st_mode
     except FileNotFoundError:
         return False
+    return stat.S_ISBLK(mode) or stat.S_ISCHR(mode)
 
 
 def pick_edition(editions, choice):
@@ -45,19 +49,36 @@ def required_bytes(edition):
     return (ESP_MIB + MSR_MIB + 2) * MIB + edition.installed_bytes + HEADROOM
 
 
+def _check_staging_space(work, edition):
+    # The drive is built in a sparse file first, which grows to about the
+    # size of the installed files.
+    need = edition.installed_bytes + 2 * GIB
+    free = shutil.disk_usage(work).free
+    if free < need:
+        raise WinToGoError(f"the drive is assembled in {work.parent} first, which needs "
+                           f"{disks.human_size(need)} free but has {disks.human_size(free)}; "
+                           "use --workdir to put it elsewhere")
+
+
 def create(iso_path, edition_choice, output, reporter, *, options=None,
            image_size=None, workdir=None, allow_non_usb=False):
     require(*REQUIRED_COMMANDS)
     options = options or customize.Options()
     options.validate()
     os.environ["MTOOLS_SKIP_CHECK"] = "1"
-    device = is_block_device(output)
+    device = is_device(output)
 
     if device:
         disk = disks.check_target(output, allow_non_usb=allow_non_usb)
         base = workdir or "/var/tmp"
+        if IS_MACOS and disk.sector_size != 512:
+            raise WinToGoError(f"{disk.path} has {disk.sector_size}-byte sectors; "
+                               "only drives with 512-byte sectors are supported")
     else:
         disk = None
+        if Path(output).resolve().is_relative_to("/dev") or (
+                os.path.lexists(output) and not os.path.isfile(output)):
+            raise WinToGoError(f"{output} is neither a disk nor an image file")
         # Image builds extract install.wim (several GB) and stage the Windows
         # partition, so work next to the output rather than in a tmpfs /tmp.
         base = workdir or Path(output).resolve().parent
@@ -79,7 +100,11 @@ def create(iso_path, edition_choice, output, reporter, *, options=None,
                 if disk.size < RECOMMENDED_MIN:
                     reporter.warning(f"{disks.human_size(disk.size)} leaves little free space; "
                                      "64 GB or more is recommended")
-                target = DeviceTarget(output)
+                if IS_MACOS:
+                    _check_staging_space(work, edition)
+                    target = StagedDeviceTarget(disk, work)
+                else:
+                    target = DeviceTarget(output)
             else:
                 size = image_size or need
                 if size < need:

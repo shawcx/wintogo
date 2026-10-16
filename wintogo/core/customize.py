@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-from .util import WinToGoError, run
+from .util import IS_MACOS, WinToGoError, run
 
 SYSTEM_HIVE = "/Windows/System32/config/SYSTEM"
 SOFTWARE_HIVE = "/Windows/System32/config/SOFTWARE"
@@ -61,9 +61,13 @@ class Options:
 
 
 def host_locale():
-    """The Linux session's locale as a Windows tag, e.g. en_GB.UTF-8 -> en-GB."""
-    for var in ("LC_ALL", "LC_CTYPE", "LANG"):
-        value = os.environ.get(var, "")
+    """The session's locale as a Windows tag, e.g. en_GB.UTF-8 -> en-GB."""
+    values = [os.environ.get(var, "") for var in ("LC_ALL", "LC_CTYPE", "LANG")]
+    if IS_MACOS:
+        # Apps started from Finder get no LANG (Python then sets LC_CTYPE to
+        # C.UTF-8); the region setting is here.
+        values.append(run(["defaults", "read", "-g", "AppleLocale"], check=False).strip())
+    for value in values:
         m = re.match(r"([a-z]{2,3})_([A-Z]{2})", value)
         if m:
             return f"{m.group(1)}-{m.group(2)}"

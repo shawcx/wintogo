@@ -1,0 +1,6 @@
+#!/bin/sh
+# Password dialog for `sudo -A`, used when the macOS GUI writes to a drive.
+# Printing nothing (Cancel) makes sudo give up.
+exec /usr/bin/osascript \
+    -e 'display dialog "Windows To Go needs an administrator password to erase the drive and install Windows on it." default answer "" with hidden answer with title "Windows To Go" with icon caution' \
+    -e 'text returned of result' 2>/dev/null

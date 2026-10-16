@@ -1,9 +1,36 @@
 """Subprocess helpers, errors and progress reporting shared by the backend."""
 
 import json
+import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
+
+IS_MACOS = sys.platform == "darwin"
+
+# Tools Homebrew lacks (see macos/build-deps.sh) are built into this checkout.
+DEPS_PREFIX = Path(__file__).resolve().parents[2] / ".deps"
+
+
+def setup_environment():
+    """Make the tools findable however the program was started.
+
+    On macOS, apps and sudo don't get Homebrew's directories on PATH, and
+    ntfs-3g's tools, wimlib with NTFS-3G support and hivex's Python module
+    come from .deps/, which must win over Homebrew's wimlib (built without
+    NTFS-3G).
+    """
+    if not IS_MACOS:
+        return
+    dirs = [DEPS_PREFIX / "bin", DEPS_PREFIX / "sbin",
+            "/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/local/sbin"]
+    path = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    first = [str(d) for d in dirs if os.path.isdir(d)]
+    os.environ["PATH"] = os.pathsep.join(first + [p for p in path if p not in first])
+    site = str(DEPS_PREFIX / "python")
+    if os.path.isdir(site) and site not in sys.path:
+        sys.path.insert(0, site)
 
 
 class WinToGoError(Exception):
@@ -13,7 +40,8 @@ class WinToGoError(Exception):
 def require(*commands):
     missing = [c for c in commands if shutil.which(c) is None]
     if missing:
-        raise WinToGoError("missing required commands: " + ", ".join(missing))
+        hint = " (see Requirements in the README)" if IS_MACOS else ""
+        raise WinToGoError("missing required commands: " + ", ".join(missing) + hint)
 
 
 def run(cmd, *, input=None, check=True):

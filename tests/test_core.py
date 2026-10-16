@@ -9,13 +9,16 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from wintogo.core import bcd, customize, pipeline, target, wim  # noqa: E402
-from wintogo.core.util import Reporter, WinToGoError  # noqa: E402
+from wintogo.core import bcd, customize, disks, iso, pipeline, target, wim  # noqa: E402
+from wintogo.core.util import Reporter, WinToGoError, setup_environment  # noqa: E402
+
+setup_environment()  # macOS: find Homebrew's and .deps/'s tools
 
 REF_BCD_TEMPLATE = Path(__file__).resolve().parents[1] / ".work" / "ref" / "BCD-Template"
 
@@ -146,6 +149,7 @@ class CustomizeTests(unittest.TestCase):
                 customize.Options(**bad).validate()
         customize.Options(local_account="matt", computer_name="WTG-1", locale="en-US").validate()
 
+    @mock.patch.object(customize, "IS_MACOS", False)
     def test_host_locale(self):
         env = {k: os.environ.pop(k) for k in ("LC_ALL", "LC_CTYPE", "LANG") if k in os.environ}
         try:
@@ -167,25 +171,117 @@ class PipelineTests(unittest.TestCase):
             pipeline.pick_edition(editions, "7")
 
 
+class IsoTests(unittest.TestCase):
+    def test_failed_attach_cleans_up(self):
+        # diskutil creates the mount point and a marker in it, then fails to
+        # mount the volume.
+        def attach(cmd, **_):
+            mountpoint = next(arg for arg in cmd if arg.endswith("/mnt"))
+            os.mkdir(mountpoint)
+            Path(mountpoint, ".autodiskmounted").touch()
+            raise WinToGoError("diskutil failed (exit 1): Error: Failed to mount the volume")
+
+        with tempfile.TemporaryDirectory() as work, \
+                mock.patch.object(iso, "_check_iso"), mock.patch.object(iso, "run", attach):
+            with self.assertRaisesRegex(WinToGoError, "could not open .*Failed to mount"):
+                with iso._attached("bogus.iso", work):
+                    pass
+            self.assertEqual(os.listdir(work), [])
+
+
+class MacDiskTests(unittest.TestCase):
+    # Trimmed `diskutil list -plist` and `diskutil info -plist` output: the
+    # internal disk, and a USB drive with a FAT partition and an APFS container.
+    LISTING = {"AllDisksAndPartitions": [
+        {"DeviceIdentifier": "disk0", "Partitions": [{"DeviceIdentifier": "disk0s2"}]},
+        {"DeviceIdentifier": "disk3", "APFSPhysicalStores": [{"DeviceIdentifier": "disk0s2"}],
+         "APFSVolumes": [{"DeviceIdentifier": "disk3s1s1", "MountPoint": "/"},
+                         {"DeviceIdentifier": "disk3s5", "MountPoint": "/System/Volumes/Data"}]},
+        {"DeviceIdentifier": "disk4", "Partitions": [
+            {"DeviceIdentifier": "disk4s1", "MountPoint": "/Volumes/STICK"},
+            {"DeviceIdentifier": "disk4s2"}]},
+        {"DeviceIdentifier": "disk5", "APFSPhysicalStores": [{"DeviceIdentifier": "disk4s2"}],
+         "APFSVolumes": [{"DeviceIdentifier": "disk5s1", "MountPoint": "/Volumes/Backup"}]},
+    ]}
+    INFOS = {
+        "disk0": {"DeviceNode": "/dev/disk0", "TotalSize": 1000555581440, "MediaName": "APPLE SSD",
+                  "BusProtocol": "Apple Fabric", "WritableMedia": True, "DeviceBlockSize": 4096},
+        "disk4": {"DeviceNode": "/dev/disk4", "TotalSize": 128035676160,
+                  "IORegistryEntryName": "Samsung PSSD T7 Media", "BusProtocol": "USB",
+                  "WritableMedia": True, "RemovableMedia": False, "Ejectable": True,
+                  "DeviceBlockSize": 512},
+    }
+
+    def test_parse_diskutil(self):
+        internal, usb = disks.parse_diskutil(self.LISTING, self.INFOS)
+        self.assertFalse(internal.is_usb)
+        self.assertIn("/", internal.mountpoints)
+        self.assertEqual(internal.sector_size, 4096)
+        self.assertTrue(usb.is_usb)
+        self.assertEqual((usb.path, usb.model, usb.size), ("/dev/disk4", "Samsung PSSD T7", 128035676160))
+        self.assertEqual(sorted(usb.mountpoints), ["/Volumes/Backup", "/Volumes/STICK"])
+
+    @mock.patch.object(disks, "IS_MACOS", True)
+    def test_mac_target_checks(self):
+        with mock.patch.object(disks, "list_disks",
+                               lambda: disks.parse_diskutil(self.LISTING, self.INFOS)):
+            with self.assertRaisesRegex(WinToGoError, "this system's"):
+                disks.check_target("/dev/rdisk0", allow_non_usb=True)
+            with self.assertRaisesRegex(WinToGoError, "unmountDisk"):
+                disks.check_target("/dev/rdisk4")
+            with self.assertRaisesRegex(WinToGoError, "/dev/disk4, not"):
+                disks.check_target("/dev/disk4s1")
+
+
 class TargetTests(unittest.TestCase):
     def test_sparse_copy(self):
         with tempfile.TemporaryDirectory() as d:
             src, dst = Path(d) / "src", Path(d) / "dst"
+            # APFS fills in holes smaller than about 16 MiB, so keep them big.
             with open(src, "wb") as f:
-                f.truncate(64 << 20)
-                f.seek(10 << 20)
+                f.truncate(1 << 30)
+                f.seek(100 << 20)
                 f.write(b"A" * 4096)
-                f.seek(50 << 20)
+                f.seek(700 << 20)
                 f.write(b"B" * 4096)
             with open(dst, "wb") as f:
-                f.truncate(80 << 20)
+                f.truncate(1100 << 20)
             target.sparse_copy(src, dst, 1 << 20)
             with open(dst, "rb") as f:
-                f.seek((1 << 20) + (10 << 20))
+                f.seek((1 << 20) + (100 << 20))
                 self.assertEqual(f.read(4096), b"A" * 4096)
-                f.seek((1 << 20) + (50 << 20))
+                f.seek((1 << 20) + (700 << 20))
                 self.assertEqual(f.read(4096), b"B" * 4096)
             self.assertLess(os.stat(dst).st_blocks * 512, 4 << 20, "destination should stay sparse")
+
+    def test_staged_device_write(self):
+        """The image's data and the Windows partition land at the right offsets."""
+        with tempfile.TemporaryDirectory() as d:
+            device = Path(d) / "device"
+            device.write_bytes(b"\xee" * (64 << 20))  # stale data that holes must leave alone
+            disk = disks.Disk(path="/dev/disk9", size=64 << 20, model="", vendor="", serial="",
+                              transport="usb", removable=False, read_only=False, hotplug=True)
+            t = target.StagedDeviceTarget(disk, d)
+            self.assertEqual(t.raw_device, "/dev/rdisk9")
+            t.raw_device = str(device)
+            t.layout.extents[3] = (40960, 81920)  # Windows partition at 20 MiB
+            with open(t.path, "wb") as f:
+                f.truncate(disk.size)
+                f.write(b"GPT!")
+                f.seek(disk.size - 4)
+                f.write(b"BAK!")
+            with open(t.windows_volume, "wb") as f:
+                f.truncate(40 << 20)
+                f.write(b"NTFS")
+            commands = []
+            with mock.patch.object(target, "run", lambda cmd, **kw: commands.append(cmd[:2]) or ""):
+                t.finish(Reporter(io.StringIO()))
+            data = device.read_bytes()
+            self.assertEqual(data[:4], b"GPT!")
+            self.assertEqual(data[-4:], b"BAK!")
+            self.assertEqual(data[20 << 20:(20 << 20) + 4], b"NTFS")
+            self.assertEqual(commands, [["diskutil", "unmountDisk"], ["diskutil", "eject"]])
+            self.assertFalse(Path(t.path).exists() or Path(t.windows_volume).exists())
 
     @unittest.skipUnless(all(shutil.which(c) for c in ("sgdisk", "mkfs.vfat", "mkntfs", "minfo", "ntfsinfo")),
                          "needs gdisk, dosfstools, mtools and ntfs-3g")
