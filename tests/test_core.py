@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from wintogo.core import bcd, customize, disks, pipeline, target, wim  # noqa: E402
+from wintogo.core import bcd, customize, disks, iso, pipeline, target, wim  # noqa: E402
 from wintogo.core.util import Reporter, WinToGoError, setup_environment  # noqa: E402
 
 setup_environment()  # macOS: find Homebrew's and .deps/'s tools
@@ -169,6 +169,24 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(pipeline.pick_edition(editions, "windows 11 home").index, 1)
         with self.assertRaises(WinToGoError):
             pipeline.pick_edition(editions, "7")
+
+
+class IsoTests(unittest.TestCase):
+    def test_failed_attach_cleans_up(self):
+        # diskutil creates the mount point and a marker in it, then fails to
+        # mount the volume.
+        def attach(cmd, **_):
+            mountpoint = next(arg for arg in cmd if arg.endswith("/mnt"))
+            os.mkdir(mountpoint)
+            Path(mountpoint, ".autodiskmounted").touch()
+            raise WinToGoError("diskutil failed (exit 1): Error: Failed to mount the volume")
+
+        with tempfile.TemporaryDirectory() as work, \
+                mock.patch.object(iso, "_check_iso"), mock.patch.object(iso, "run", attach):
+            with self.assertRaisesRegex(WinToGoError, "could not open .*Failed to mount"):
+                with iso._attached("bogus.iso", work):
+                    pass
+            self.assertEqual(os.listdir(work), [])
 
 
 class MacDiskTests(unittest.TestCase):

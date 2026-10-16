@@ -4,6 +4,7 @@ import contextlib
 import os
 import platform
 import plistlib
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -113,7 +114,9 @@ def _attached(iso_path, workdir=None):
     try:
         entities = plistlib.loads(run(cmd).encode())["system-entities"]
     except WinToGoError as e:
-        os.rmdir(parent)
+        # Nothing is mounted, but diskutil can leave the mount point behind
+        # with an empty .autodiskmounted file in it.
+        shutil.rmtree(parent, ignore_errors=True)
         raise WinToGoError(f"could not open {iso_path}: {e}") from None
     device = next(e["dev-entry"] for e in entities if "dev-entry" in e)
     try:
