@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- The app icon on macOS's rounded-square tile; install.sh renders it to an .icns. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#dce8f8"/>
+      <stop offset="1" stop-color="#b5cdee"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000" flood-opacity=".25"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)" filter="url(#shadow)"/>
+  <g transform="translate(212 207) scale(4.6875)">
+    <path d="M48 38V27a9 9 0 0 1 9-9h14a9 9 0 0 1 9 9v11" fill="none" stroke="#77767b" stroke-width="8" stroke-linecap="round"/>
+    <rect x="12" y="36" width="104" height="80" rx="12" fill="#1a5fb4"/>
+    <rect x="12" y="32" width="104" height="78" rx="12" fill="#f6f5f4"/>
+    <path d="M24 32h80a12 12 0 0 1 12 12v10H12V44a12 12 0 0 1 12-12z" fill="#3584e4"/>
+    <rect x="88" y="40" width="18" height="6" rx="3" fill="#fff" fill-opacity=".85"/>
+    <rect x="22" y="62" width="84" height="28" rx="4" fill="#99c1f1"/>
+    <path d="M12 96h104v2a12 12 0 0 1-12 12H24a12 12 0 0 1-12-12z" fill="#deddda"/>
+    <rect x="22" y="100" width="10" height="6" rx="2" fill="#3584e4"/>
+  </g>
+</svg>
