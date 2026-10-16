@@ -8,7 +8,7 @@ import sys
 import threading
 
 from .core import customize, disks, iso, pipeline
-from .core.util import JsonReporter, Reporter, WinToGoError
+from .core.util import IS_MACOS, JsonReporter, Reporter, WinToGoError, setup_environment
 
 
 def cmd_editions(args):
@@ -76,7 +76,7 @@ def cmd_create(args):
     options = load_options(args)
     if args.stdin_control:
         watch_for_cancel()
-    if pipeline.is_block_device(args.target) and not args.yes:
+    if pipeline.is_device(args.target) and not args.yes:
         disk = disks.check_target(args.target, allow_non_usb=args.allow_non_usb)
         print(f"ALL DATA on {disk.label} will be destroyed.", file=sys.stderr)
         reply = input("Type the device path to continue: ")
@@ -118,7 +118,8 @@ def main(argv=None):
     p = sub.add_parser("create", help="install Windows onto a drive or into an image file")
     p.add_argument("--iso", required=True)
     p.add_argument("--edition", required=True, help="edition index or exact name")
-    p.add_argument("--target", required=True, help="whole-disk device (e.g. /dev/sdb) or image file")
+    p.add_argument("--target", required=True,
+                   help=f"whole-disk device (e.g. {'/dev/disk4' if IS_MACOS else '/dev/sdb'}) or image file")
     p.add_argument("--size", type=float, help="image file size in GiB (default: just big enough)")
     p.add_argument("--workdir", help="where to put temporary files")
     p.add_argument("--allow-non-usb", action="store_true", help="allow a target that isn't a USB disk")
@@ -136,6 +137,7 @@ def main(argv=None):
     p.set_defaults(func=cmd_create)
 
     args = parser.parse_args(argv)
+    setup_environment()
     try:
         args.func(args)
     except WinToGoError as e:

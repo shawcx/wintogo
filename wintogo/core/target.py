@@ -12,6 +12,7 @@ partitions by them.
 For image files nothing is mounted and no root is needed: the ESP is written
 in place with mtools, and the NTFS partition is built as a separate sparse
 file (mkntfs and wimlib can't write at an offset) and copied in at the end.
+On macOS a drive is built the same way and then written out in one pass.
 """
 
 import os
@@ -20,6 +21,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .disks import human_size
 from .util import WinToGoError, run
 
 MIB = 1 << 20
@@ -223,25 +225,110 @@ class ImageTarget(Target):
         Path(self.path).unlink(missing_ok=True)
 
 
+class StagedDeviceTarget(ImageTarget):
+    """A real drive on macOS. Needs root.
+
+    macOS mounts filesystems as soon as they appear on a drive, and new
+    partitions only appear once the drive is closed after writing. So the
+    drive is built as a sparse image of the same size, its data is written
+    to the raw device in one pass while the drive is unmounted, and then the
+    drive is ejected.
+    """
+
+    def __init__(self, disk, workdir):
+        super().__init__(Path(workdir) / "disk.img", disk.size, workdir)
+        self.device = disk.path
+        # The raw node bypasses the buffer cache, which is much faster.
+        self.raw_device = disk.path.replace("/dev/disk", "/dev/rdisk", 1)
+
+    def finish(self, reporter):
+        reporter.step("write", "Writing to the drive")
+        win_start, _ = self.layout.extents[3]
+        # The image holds the partition tables and the ESP; the Windows
+        # partition is still in its own file.
+        sources = [(Path(self.path), 0), (self._win_file, win_start * SECTOR)]
+        total = sum(length for src, _ in sources for _, length in file_extents(src))
+        done = 0
+
+        def progress(n):
+            nonlocal done
+            done += n
+            reporter.progress(done / total, f"{human_size(done)} of {human_size(total)}")
+
+        run(["diskutil", "unmountDisk", "force", self.device])
+        fd = os.open(self.raw_device, os.O_WRONLY)
+        try:
+            for src, offset in sources:
+                sparse_copy_fd(src, fd, offset, progress)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        self._win_file.unlink()
+        Path(self.path).unlink()
+        # Closing the device made macOS read the new partition table, and it
+        # may mount what it found; ejecting unmounts and flushes the drive.
+        for _ in range(5):
+            try:
+                run(["diskutil", "eject", self.device])
+                reporter.log("ejected the drive; it can be unplugged")
+                return
+            except WinToGoError as e:
+                error = e
+                time.sleep(1)
+        reporter.warning(f"could not eject {self.device}; eject it before unplugging it ({error})")
+
+
+CHUNK = 8 << 20
+
+
+def file_extents(path):
+    """The (offset, length) of each run of data in a sparse file."""
+    with open(path, "rb") as f:
+        return list(_data_extents(f.fileno(), os.path.getsize(path)))
+
+
+def _data_extents(fd, size):
+    pos = 0
+    while pos < size:
+        try:
+            data = os.lseek(fd, pos, os.SEEK_DATA)
+        except OSError:  # ENXIO: only a hole remains
+            return
+        hole = os.lseek(fd, data, os.SEEK_HOLE)
+        yield data, hole - data
+        pos = hole
+
+
+def _copy_range(sfd, dfd, offset, length, dst_offset, progress=None):
+    """Copy length bytes at offset in sfd to dst_offset + offset in dfd."""
+    while length > 0:
+        if hasattr(os, "copy_file_range"):  # Linux: done in the kernel
+            n = os.copy_file_range(sfd, dfd, min(length, 1 << 30), offset, dst_offset + offset)
+        else:
+            data = os.pread(sfd, min(length, CHUNK), offset)
+            n = os.pwrite(dfd, data, dst_offset + offset) if data else 0
+        if n == 0:
+            raise WinToGoError("short copy while assembling the image")
+        length -= n
+        offset += n
+        if progress:
+            progress(n)
+
+
+def sparse_copy_fd(src, dfd, dst_offset, progress=None):
+    """Copy the data in src to dfd at dst_offset, skipping holes."""
+    with open(src, "rb") as fin:
+        sfd = fin.fileno()
+        for offset, length in _data_extents(sfd, os.path.getsize(src)):
+            _copy_range(sfd, dfd, offset, length, dst_offset, progress)
+
+
 def sparse_copy(src, dst, dst_offset, reporter=None):
     """Copy src into dst at dst_offset, skipping holes so dst stays sparse."""
     size = os.path.getsize(src)
     with open(src, "rb") as fin, open(dst, "r+b") as fout:
         sfd, dfd = fin.fileno(), fout.fileno()
-        pos = 0
-        while pos < size:
-            try:
-                data = os.lseek(sfd, pos, os.SEEK_DATA)
-            except OSError:  # ENXIO: only a hole remains
-                break
-            hole = os.lseek(sfd, data, os.SEEK_HOLE)
-            n, off = hole - data, data
-            while n > 0:
-                copied = os.copy_file_range(sfd, dfd, min(n, 1 << 30), off, dst_offset + off)
-                if copied == 0:
-                    raise WinToGoError("short copy while assembling the image")
-                n -= copied
-                off += copied
-            pos = hole
+        for offset, length in _data_extents(sfd, size):
+            _copy_range(sfd, dfd, offset, length, dst_offset)
             if reporter:
-                reporter.progress(pos / size)
+                reporter.progress((offset + length) / size)

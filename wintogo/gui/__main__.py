@@ -6,12 +6,14 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw  # noqa: E402
 
+from ..core.util import setup_environment  # noqa: E402
 from .window import MainWindow  # noqa: E402
 
 APP_ID = "io.github.wintogo"
 
 
 def main(argv=None):
+    setup_environment()
     app = Adw.Application(application_id=APP_ID)
 
     def activate(app):

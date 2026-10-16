@@ -6,7 +6,7 @@ import subprocess
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
-from .util import WinToGoError, run
+from .util import IS_MACOS, WinToGoError, run
 
 # WIM header layout (little-endian): magic at 0, XML resource header at 72.
 # A resource header is 7 bytes of stored size, 1 flag byte, 8 bytes of
@@ -148,7 +148,11 @@ def apply_image(wim_path, index, target, reporter):
         proc.wait()
         raise
     if proc.wait() != 0:
-        raise WinToGoError("applying the Windows image failed:\n" + "\n".join(tail))
+        detail = "\n".join(tail)
+        if IS_MACOS and "without support for NTFS-3G" in detail:
+            # Homebrew's wimlib is built that way.
+            detail += "\nBuild one that can with macos/build-deps.sh."
+        raise WinToGoError("applying the Windows image failed:\n" + detail)
 
 
 def extract_paths(wim_path, index, paths, dest_dir):

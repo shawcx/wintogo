@@ -1,9 +1,10 @@
 """Running the backend from the GUI and relaying its JSON progress events.
 
-Writing to a drive needs root, so the backend runs through pkexec; building
-an image file doesn't, so it runs directly. Either way the GUI talks to it
-the same way: the options as one JSON line on stdin, then "cancel" to stop;
-progress comes back as JSON lines on stdout.
+Writing to a drive needs root, so the backend runs through pkexec (on macOS,
+sudo with a password dialog); building an image file doesn't, so it runs
+directly. Either way the GUI talks to it the same way: the options as one
+JSON line on stdin, then "cancel" to stop; progress comes back as JSON lines
+on stdout.
 """
 
 import json
@@ -13,7 +14,11 @@ from pathlib import Path
 
 from gi.repository import Gio, GLib
 
-BACKEND = Path(__file__).resolve().parents[2] / "bin" / "wintogo"
+from ..core.util import IS_MACOS
+
+BIN = Path(__file__).resolve().parents[2] / "bin"
+BACKEND = BIN / "wintogo"
+ASKPASS = BIN / "wintogo-askpass"
 
 
 class Job:
@@ -21,18 +26,22 @@ class Job:
                  on_event, on_exit, log_path=None):
         argv = [sys.executable, str(BACKEND), "create", "--json", "--stdin-control", "--yes",
                 "--iso", str(iso), "--edition", str(edition_index), "--target", str(target)]
-        if as_root:
+        launcher = Gio.SubprocessLauncher.new(
+            Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE
+            | Gio.SubprocessFlags.STDERR_MERGE)
+        if as_root and IS_MACOS:
+            argv = ["sudo", "-A", "--"] + argv
+            launcher.setenv("SUDO_ASKPASS", str(ASKPASS), True)
+        elif as_root:
             argv = ["pkexec"] + argv
         self._on_event = on_event
         self._on_exit = on_exit
         self._saw_result = False
+        self._sudo_error = None
         self._log = open(log_path, "w") if log_path else None
         self._log_line("$ " + " ".join(argv))
 
-        self._proc = Gio.Subprocess.new(
-            argv,
-            Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE
-            | Gio.SubprocessFlags.STDERR_MERGE)
+        self._proc = launcher.spawnv(argv)
         self._stdin = self._proc.get_stdin_pipe()
         self._write(json.dumps(options) + "\n")
         self._stdout = Gio.DataInputStream.new(self._proc.get_stdout_pipe())
@@ -69,8 +78,10 @@ class Job:
         try:
             event = json.loads(line)
         except ValueError:
-            # Not a progress event: pkexec's own messages, a Python traceback.
+            # Not a progress event: pkexec's or sudo's own messages, a Python traceback.
             event = {"type": "log", "message": line}
+            if line.startswith("sudo:"):
+                self._sudo_error = line
         if event.get("type") in ("done", "error"):
             self._saw_result = True
         self._on_event(event)
@@ -86,9 +97,13 @@ class Job:
         if self._log:
             self._log.close()
         # pkexec exits 126 when the password dialog is dismissed, 127 when
-        # authorization fails; neither sends any event.
+        # authorization fails; sudo says why on stderr. None sends any event.
         if not self._saw_result:
-            if status == 126:
+            if self._sudo_error and "incorrect password" in self._sudo_error:
+                self._on_event({"type": "error", "message": "Not authorized to write to the drive."})
+            elif self._sudo_error:
+                self._on_event({"type": "error", "message": "Authentication was cancelled."})
+            elif status == 126:
                 self._on_event({"type": "error", "message": "Authentication was cancelled."})
             elif status == 127:
                 self._on_event({"type": "error", "message": "Not authorized to write to the drive."})

@@ -1,7 +1,7 @@
 # wintogo
 
 Install a full, bootable Windows 10/11 onto a USB drive — Windows To Go —
-from Linux. No Windows machine or VM needed.
+from Linux or macOS. No Windows machine or VM needed.
 
 ## Requirements
 
@@ -10,8 +10,23 @@ sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 python3-hivex \
                  wimtools ntfs-3g gdisk dosfstools mtools 7zip
 ```
 
-(`7zip` is called `p7zip-full` on older releases.) Target machines must boot
-in UEFI mode; Secure Boot can stay on.
+(`7zip` is called `p7zip-full` on older releases.)
+
+On macOS:
+
+```
+brew install gptfdisk dosfstools mtools autoconf automake libtool \
+             gtk4 libadwaita pygobject3 adwaita-icon-theme
+macos/build-deps.sh
+```
+
+Homebrew's ntfs-3g is Linux-only (on macOS it needs macFUSE) and its wimlib
+can't write NTFS, so `build-deps.sh` builds ntfs-3g's library and tools
+(no FUSE driver), wimlib with NTFS-3G support and hivex's Python module into
+`.deps/` in this checkout; delete that to undo. Rerun it if you move the
+checkout or Homebrew's `python3` changes version.
+
+Target machines must boot in UEFI mode; Secure Boot can stay on.
 
 A 64 GB or larger USB SSD is recommended. Flash sticks work but Windows runs
 slowly from them.
@@ -24,8 +39,11 @@ bin/wintogo-gui [windows.iso]
 sudo ./install.sh      # optional: nicer password prompt (polkit policy)
 ```
 
+On macOS, `./install.sh` adds the app to `~/Applications` instead.
+
 Choose the ISO, edition and USB drive, adjust the first-time setup options,
-and press Install. Writing to a drive asks for your password (pkexec). The
+and press Install. Writing to a drive asks for your password (pkexec; on
+macOS, sudo with a password dialog). The
 "Create a disk image file instead" switch builds a raw image without root,
 e.g. for testing in QEMU.
 
@@ -41,13 +59,15 @@ sudo bin/wintogo create --iso Win11.iso --edition "Windows 11 Pro" --target /dev
 bin/wintogo create --iso Win11.iso --edition 6 --target test.img     # no root needed
 ```
 
+On macOS drives are `/dev/diskN` (`bin/wintogo disks` lists USB ones).
+
 Options that include a password go in a JSON file (`--config opts.json`, or
 `--config -` for stdin), using the field names of `customize.Options`.
 
 ## What it does
 
 1. Reads `sources/install.wim|esd` from the ISO (loop-mounted as root,
-   extracted with 7z otherwise).
+   extracted with 7z otherwise; attached read-only on macOS).
 2. Partitions the target GPT: 300 MiB ESP (FAT32), 16 MiB MSR, NTFS for
    Windows, with GUIDs chosen up front.
 3. Applies the edition with wimlib straight onto the unmounted NTFS volume.
@@ -62,6 +82,11 @@ Options that include a password go in a JSON file (`--config opts.json`, or
 Nothing is mounted during the build; desktop automounting of the target is
 suppressed while it is written.
 
+macOS mounts filesystems as soon as they appear on a drive, so there the
+drive is first built as a sparse image in `/var/tmp` (it needs about the size
+of the installed files free; `--workdir` moves it), then written to the raw
+device in one pass with the drive unmounted, and ejected.
+
 ## Testing a drive in QEMU
 
 ```
@@ -70,7 +95,8 @@ sudo bin/wintogo-vm /dev/sdX     # a real drive (unmount it first)
 ```
 
 The disk is attached as a USB drive with Secure Boot on (needs `qemu-system-x86`
-and `ovmf`). The image itself is not modified: changes go to
+and `ovmf`; on macOS `brew install qemu`, whose firmware has no Microsoft keys,
+so Secure Boot isn't enforced, and Apple silicon emulates x86, very slowly). The image itself is not modified: changes go to
 `test.img.overlay.qcow2`, kept between runs so first-boot setup happens once.
 `--reset` starts over, `--snapshot` discards changes on exit, `--write` writes
 into the image. For a real drive, changes are discarded on exit unless you

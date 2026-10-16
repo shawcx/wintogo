@@ -6,12 +6,45 @@
 #   sudo ./install.sh     also install a polkit policy, so the password prompt
 #                         says what it is for instead of "run python3 as root"
 #   ./install.sh --remove / sudo ./install.sh --remove
+#
+# On macOS, ./install.sh adds "Windows To Go" to ~/Applications instead.
 
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 APP_ID=io.github.wintogo
 PYTHON=$(command -v python3)
+
+if [[ $(uname -s) == Darwin ]]; then
+    [[ $EUID -ne 0 ]] || { echo "install.sh: run it without sudo on macOS" >&2; exit 1; }
+    app="$HOME/Applications/Windows To Go.app"
+    if [[ ${1:-} == --remove ]]; then
+        rm -rf "$app"
+        echo "removed"
+        exit 0
+    fi
+    mkdir -p "$app/Contents/MacOS"
+    cat >"$app/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key><string>wintogo</string>
+  <key>CFBundleIdentifier</key><string>$APP_ID</string>
+  <key>CFBundleName</key><string>Windows To Go</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+</dict>
+</plist>
+EOF
+    # Apps don't get Homebrew on their PATH, so name the python3 that has gi.
+    cat >"$app/Contents/MacOS/wintogo" <<EOF
+#!/bin/sh
+exec "$PYTHON" "$HERE/bin/wintogo-gui" "\$@"
+EOF
+    chmod +x "$app/Contents/MacOS/wintogo"
+    echo "installed $app"
+    exit 0
+fi
 
 if [[ $EUID -eq 0 ]]; then
     apps=/usr/share/applications

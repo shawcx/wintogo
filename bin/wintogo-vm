@@ -4,7 +4,8 @@
 #
 # The disk is attached as USB mass storage on an xHCI controller and booted by
 # OVMF with Secure Boot enforced and Microsoft's keys enrolled, which is how a
-# real PC sees the drive.
+# real PC sees the drive. (On macOS, Homebrew's QEMU has no firmware with
+# Microsoft's keys, so Secure Boot is available but not enforced.)
 #
 # By default the image itself is never modified: the VM writes to a qcow2
 # overlay next to it (<image>.overlay.qcow2), which is kept between runs so
@@ -24,7 +25,11 @@
 
 set -euo pipefail
 
+# Runs under macOS's bash 3.2 too, where expanding an empty array trips set -u;
+# hence ${a[@]+"${a[@]}"}.
+
 PROG=${0##*/}
+OS=$(uname -s)
 MEMORY=6G
 CPUS=4
 SECURE_BOOT=1
@@ -40,8 +45,8 @@ usage() {
     cat <<EOF
 Usage: $PROG [options] <image-or-device> [-- extra qemu args]
 
-Boot a Windows To Go image file (or a real drive such as /dev/sdb, which
-needs root) in QEMU, attached as a USB disk.
+Boot a Windows To Go image file (or a real drive such as /dev/sdb or
+/dev/disk4, which needs root) in QEMU, attached as a USB disk.
 
 Options:
   -m, --memory SIZE     guest RAM (default: $MEMORY)
@@ -104,22 +109,34 @@ DISK=$(readlink -f "${args[0]}")
 [[ -r $DISK ]] || die "no read access to $DISK (run as root?)"
 [[ $CPUS =~ ^[1-9][0-9]*$ ]] || die "invalid cpu count: $CPUS"
 [[ $DISK_BUS == usb || $DISK_BUS == virtio ]] || die "--disk must be usb or virtio"
-command -v qemu-system-x86_64 >/dev/null || die "qemu-system-x86_64 not found (sudo apt install qemu-system-x86)"
-if [[ -b $DISK ]] && lsblk -no MOUNTPOINTS "$DISK" | grep -q .; then
-    die "$DISK has mounted filesystems; unmount them first"
+if [[ $OS == Darwin ]]; then
+    command -v qemu-system-x86_64 >/dev/null || die "qemu-system-x86_64 not found (brew install qemu)"
+    if [[ -b $DISK ]] && mount | grep -q "^${DISK}s[0-9]"; then
+        die "$DISK has mounted filesystems; unmount them first (diskutil unmountDisk $DISK)"
+    fi
+else
+    command -v qemu-system-x86_64 >/dev/null || die "qemu-system-x86_64 not found (sudo apt install qemu-system-x86)"
+    if [[ -b $DISK ]] && lsblk -no MOUNTPOINTS "$DISK" | grep -q .; then
+        die "$DISK has mounted filesystems; unmount them first"
+    fi
 fi
 
 # ------------------------------------------------------------------ firmware
 
+# QEMU's own builds, as Homebrew installs them; the variable store has no
+# keys enrolled, so Secure Boot isn't enforced.
+QEMU_SHARE=$(dirname "$(command -v qemu-system-x86_64)")/../share/qemu
 if ((SECURE_BOOT)); then
     candidates=(
         /usr/share/OVMF/OVMF_CODE_4M.secboot.fd:/usr/share/OVMF/OVMF_VARS_4M.ms.fd
         /usr/share/edk2/ovmf/OVMF_CODE.secboot.fd:/usr/share/edk2/ovmf/OVMF_VARS.secboot.fd
+        "$QEMU_SHARE/edk2-x86_64-secure-code.fd:$QEMU_SHARE/edk2-i386-vars.fd"
     )
 else
     candidates=(
         /usr/share/OVMF/OVMF_CODE_4M.fd:/usr/share/OVMF/OVMF_VARS_4M.fd
         /usr/share/edk2/ovmf/OVMF_CODE.fd:/usr/share/edk2/ovmf/OVMF_VARS.fd
+        "$QEMU_SHARE/edk2-x86_64-code.fd:$QEMU_SHARE/edk2-i386-vars.fd"
     )
 fi
 if [[ -z ${OVMF_CODE:-} || -z ${OVMF_VARS:-} ]]; then
@@ -130,7 +147,11 @@ if [[ -z ${OVMF_CODE:-} || -z ${OVMF_VARS:-} ]]; then
         fi
     done
 fi
-[[ -f ${OVMF_CODE:-} && -f ${OVMF_VARS:-} ]] || die "OVMF firmware not found (sudo apt install ovmf)"
+if [[ $OS == Darwin ]]; then
+    [[ -f ${OVMF_CODE:-} && -f ${OVMF_VARS:-} ]] || die "UEFI firmware not found (brew install qemu)"
+else
+    [[ -f ${OVMF_CODE:-} && -f ${OVMF_VARS:-} ]] || die "OVMF firmware not found (sudo apt install ovmf)"
+fi
 
 # ------------------------------------------------------------------ disk + state
 
@@ -156,7 +177,10 @@ if ((RESET)) && [[ -f $DISK ]]; then
 fi
 # Firmware variables (boot entries) persist alongside the overlay; they must
 # match the Secure Boot setting they were created with.
-[[ -f $VARS ]] || cp "$OVMF_VARS" "$VARS"
+if [[ ! -f $VARS ]]; then
+    cp "$OVMF_VARS" "$VARS"
+    chmod u+w "$VARS"   # Homebrew's copy is read-only
+fi
 
 case $MODE in
     overlay)
@@ -232,8 +256,16 @@ machine=(-machine q35,smm=on)
 ((SECURE_BOOT)) && machine+=(-global driver=cfi.pflash01,property=secure,value=on)
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then
     machine+=(-enable-kvm -cpu host)
+elif [[ $OS == Darwin && $(uname -m) == x86_64 && $(sysctl -n kern.hv_support 2>/dev/null) == 1 ]]; then
+    machine+=(-accel hvf -cpu host)
 else
-    echo "WARNING: /dev/kvm not accessible; Windows will be very slow" >&2
+    # Emulated: "max" has the SSE4.2 and POPCNT that Windows 11 requires.
+    machine+=(-accel tcg,thread=multi -cpu max)
+    if [[ $OS == Darwin && $(uname -m) == arm64 ]]; then
+        echo "WARNING: this Mac can't virtualize x86; Windows is emulated and will be very slow" >&2
+    else
+        echo "WARNING: no hardware virtualization (/dev/kvm); Windows will be very slow" >&2
+    fi
 fi
 
 log "booting $DISK as a $DISK_BUS disk (secure boot: $( ((SECURE_BOOT)) && echo on || echo off ), devices: $( ((VIRTIO)) && echo virtio || echo emulated ))"
@@ -249,5 +281,5 @@ qemu-system-x86_64 \
     "${disk_dev[@]}" \
     "${devices[@]}" \
     -rtc base=localtime \
-    "${DISPLAY_OPT[@]}" \
-    "${extra[@]}"
+    ${DISPLAY_OPT[@]+"${DISPLAY_OPT[@]}"} \
+    ${extra[@]+"${extra[@]}"}

@@ -13,30 +13,58 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 from ..core import customize, disks, iso, pipeline  # noqa: E402
-from ..core.util import WinToGoError  # noqa: E402
+from ..core.util import DEPS_PREFIX, IS_MACOS, WinToGoError  # noqa: E402
 from . import style  # noqa: E402
 from .job import Job, log_path  # noqa: E402
 
-# Command (or Python module) -> Debian/Ubuntu package that provides it.
-DEPENDENCIES = {
-    "7z": "7zip", "wimlib-imagex": "wimtools", "sgdisk": "gdisk", "mkfs.vfat": "dosfstools",
-    "mcopy": "mtools", "mkntfs": "ntfs-3g", "ntfscat": "ntfs-3g", "ntfscp": "ntfs-3g",
-    "pkexec": "pkexec", "lsblk": "util-linux",
-}
+if IS_MACOS:
+    # Command -> Homebrew formula that provides it.
+    DEPENDENCIES = {"sgdisk": "gptfdisk", "mkfs.vfat": "dosfstools", "mcopy": "mtools"}
+    # Homebrew has no ntfs-3g tools and no NTFS-3G support in wimlib, so
+    # macos/build-deps.sh builds them (and hivex's Python module) into .deps/,
+    # with these formulae.
+    BUILT_COMMANDS = ("wimlib-imagex", "mkntfs", "ntfscat", "ntfscp")
+    BUILD_DEPENDENCIES = {"autoreconf": "autoconf", "aclocal": "automake",
+                          "glibtoolize": "libtool", "pkg-config": "pkgconf"}
+    BUILD_SCRIPT = DEPS_PREFIX.parent / "macos" / "build-deps.sh"
+else:
+    # Command (or Python module) -> Debian/Ubuntu package that provides it.
+    DEPENDENCIES = {
+        "7z": "7zip", "wimlib-imagex": "wimtools", "sgdisk": "gdisk", "mkfs.vfat": "dosfstools",
+        "mcopy": "mtools", "mkntfs": "ntfs-3g", "ntfscat": "ntfs-3g", "ntfscp": "ntfs-3g",
+        "pkexec": "pkexec", "lsblk": "util-linux",
+    }
 
 # How much of the overall progress bar each backend step takes up.
 STEP_WEIGHTS = {"source": 3, "partition": 2, "apply": 82, "customize": 3, "boot": 2, "finish": 8}
+# On macOS a drive is built in a file, then written out in a "write" step.
+STAGED_STEP_WEIGHTS = {"source": 2, "partition": 1, "apply": 46, "customize": 2, "boot": 1,
+                       "finish": 0, "write": 48}
 
 DISK_POLL_SECONDS = 3
 
 _style_installed = False
 
 
-def missing_packages():
+def missing_dependencies():
+    """(what's missing, the command that installs it), or None."""
     packages = {pkg for cmd, pkg in DEPENDENCIES.items() if shutil.which(cmd) is None}
-    if importlib.util.find_spec("hivex") is None:
-        packages.add("python3-hivex")
-    return sorted(packages)
+    no_hivex = importlib.util.find_spec("hivex") is None
+    if not IS_MACOS:
+        if no_hivex:
+            packages.add("python3-hivex")
+        packages = sorted(packages)
+        return ("Missing packages: " + " ".join(packages),
+                "sudo apt install " + " ".join(packages)) if packages else None
+
+    build = no_hivex or not all(any((DEPS_PREFIX / d / c).exists() for d in ("bin", "sbin"))
+                                for c in BUILT_COMMANDS)
+    missing = sorted(packages) + (["NTFS tools"] if build else [])
+    if build:
+        packages |= {pkg for cmd, pkg in BUILD_DEPENDENCIES.items() if shutil.which(cmd) is None}
+    steps = (["brew install " + " ".join(sorted(packages))] if packages else []) + \
+        ([str(BUILD_SCRIPT)] if build else [])
+    return ("Missing: " + ", ".join(missing), " && ".join(steps)) if steps else None
 
 
 class MainWindow(Adw.ApplicationWindow):
@@ -56,6 +84,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.close_after_job = False
         self._step = None
         self._step_base = 0.0
+        self._weights = STEP_WEIGHTS
 
         self.toasts = Adw.ToastOverlay()
         view = Adw.ToolbarView()
@@ -332,11 +361,11 @@ class MainWindow(Adw.ApplicationWindow):
         self.start_button.set_visible(self.job is None)
 
     def _check_dependencies(self):
-        missing = missing_packages()
+        missing = missing_dependencies()
         if missing:
-            self.banner.set_title("Missing packages: " + " ".join(missing))
+            title, command = missing
+            self.banner.set_title(title)
             self.banner.set_button_label("Copy install command")
-            command = "sudo apt install " + " ".join(missing)
             self.banner.connect("button-clicked",
                                 lambda *_: (self.get_clipboard().set(command),
                                             self.toast("Command copied")))
@@ -405,10 +434,16 @@ class MainWindow(Adw.ApplicationWindow):
     # ------------------------------------------------------------ target
 
     def refresh_disks(self):
-        try:
-            found = disks.list_usb_disks()
-        except WinToGoError:
-            found = []
+        # diskutil takes a noticeable moment, so look in the background.
+        def work():
+            try:
+                found = disks.list_usb_disks()
+            except WinToGoError:
+                found = []
+            GLib.idle_add(self._disks_found, found)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _disks_found(self, found):
         if [(d.path, d.size, bool(d.mountpoints)) for d in found] == \
                 [(d.path, d.size, bool(d.mountpoints)) for d in self.disks]:
             return
@@ -488,6 +523,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._set_outcome(None)
         self.progress_card.set_visible(True)
         self.cancel_button.set_visible(True)
+        self._weights = STAGED_STEP_WEIGHTS if IS_MACOS and not image_mode else STEP_WEIGHTS
         self.status_label.set_text("Starting…")
         self.detail_label.set_text("Waiting for authorization" if not image_mode else "")
         self.cancel_button.set_sensitive(True)
@@ -498,8 +534,11 @@ class MainWindow(Adw.ApplicationWindow):
         self.update_state()
 
     def _unmount(self, disk):
-        """Unmount the drive's partitions through udisks (no root needed)."""
+        """Unmount the drive's partitions through udisks or diskutil (no root needed)."""
         try:
+            if IS_MACOS:
+                disks.run(["diskutil", "unmountDisk", disk.path])
+                return True
             out = disks.run(["lsblk", "-lnpo", "NAME,MOUNTPOINTS", disk.path])
             for line in out.splitlines():
                 parts = line.split(None, 1)
@@ -525,14 +564,14 @@ class MainWindow(Adw.ApplicationWindow):
         kind = event.get("type")
         if kind == "step":
             if self._step:
-                self._step_base += STEP_WEIGHTS.get(self._step, 0) / 100
+                self._step_base += self._weights.get(self._step, 0) / 100
             self._step = event["id"]
             self.status_label.set_text(event["label"])
             self.detail_label.set_text("")
             self._set_progress(self._step_base)
             self._log("▸ " + event["label"])
         elif kind == "progress":
-            weight = STEP_WEIGHTS.get(self._step, 0) / 100
+            weight = self._weights.get(self._step, 0) / 100
             self._set_progress(min(1.0, self._step_base + weight * event["fraction"]))
             if event.get("detail"):
                 self.detail_label.set_text(event["detail"])
