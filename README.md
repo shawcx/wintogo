@@ -3,6 +3,10 @@
 Install a full, bootable Windows 10/11 onto a USB drive — Windows To Go —
 from Linux or macOS. No Windows machine or VM needed.
 
+**Status: experimental.** Drives it builds have been booted in QEMU (UEFI,
+Secure Boot), not yet on a range of real PCs, and only Pro editions have
+been tried. It rewrites the whole target drive, so check `--target` twice.
+
 ## Requirements
 
 ```
@@ -21,8 +25,8 @@ brew install gptfdisk dosfstools mtools autoconf automake libtool \
 macos/build-deps.sh
 ```
 
-(Add `qemu` for installing into a VHDX.) Homebrew's ntfs-3g is Linux-only (on macOS it needs macFUSE) and its wimlib
-can't write NTFS, so `build-deps.sh` builds ntfs-3g's library and tools
+(Add `qemu` for installing into a VHDX.) Homebrew's ntfs-3g is Linux-only
+(on macOS it needs macFUSE) and its wimlib can't write NTFS, so `build-deps.sh` builds ntfs-3g's library and tools
 (no FUSE driver), wimlib with NTFS-3G support and hivex's Python module into
 `.deps/` in this checkout; delete that to undo. Rerun it if you move the
 checkout or Homebrew's `python3` changes version.
@@ -106,8 +110,8 @@ sudo bin/wintogo-vm /dev/sdX     # a real drive (unmount it first)
 
 The disk is attached as a USB drive with Secure Boot on (needs `qemu-system-x86`
 and `ovmf`; on macOS `brew install qemu`, whose firmware has no Microsoft keys,
-so Secure Boot isn't enforced, and Apple silicon emulates x86, very slowly). The image itself is not modified: changes go to
-`test.img.overlay.qcow2`, kept between runs so first-boot setup happens once.
+so Secure Boot isn't enforced, and Apple silicon emulates x86, very slowly).
+The image itself is not modified: changes go to `test.img.overlay.qcow2`, kept between runs so first-boot setup happens once.
 `--reset` starts over, `--snapshot` discards changes on exit, `--write` writes
 into the image. For a real drive, changes are discarded on exit unless you
 pass `--write`.
@@ -131,3 +135,8 @@ first: that attaches a small spare virtio disk for the driver to bind to.
 ```
 python3 -m unittest discover -s tests
 ```
+
+## Licence
+
+MIT; see [LICENSE](LICENSE). Not affiliated with or endorsed by Microsoft.
+Windows and Windows To Go are trademarks of Microsoft Corporation.
