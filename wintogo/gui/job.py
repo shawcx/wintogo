@@ -23,9 +23,11 @@ ASKPASS = BIN / "wintogo-askpass"
 
 class Job:
     def __init__(self, *, iso, edition_index, target, as_root, options,
-                 on_event, on_exit, log_path=None):
+                 on_event, on_exit, vhdx=False, log_path=None):
         argv = [sys.executable, str(BACKEND), "create", "--json", "--stdin-control", "--yes",
                 "--iso", str(iso), "--edition", str(edition_index), "--target", str(target)]
+        if vhdx:
+            argv.append("--vhdx")
         launcher = Gio.SubprocessLauncher.new(
             Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE
             | Gio.SubprocessFlags.STDERR_MERGE)

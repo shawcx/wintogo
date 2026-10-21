@@ -10,7 +10,8 @@ sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 python3-hivex \
                  wimtools ntfs-3g gdisk dosfstools mtools 7zip
 ```
 
-(`7zip` is called `p7zip-full` on older releases.)
+(`7zip` is called `p7zip-full` on older releases.) Installing into a VHDX
+also needs `qemu-utils`.
 
 On macOS:
 
@@ -20,7 +21,7 @@ brew install gptfdisk dosfstools mtools autoconf automake libtool \
 macos/build-deps.sh
 ```
 
-Homebrew's ntfs-3g is Linux-only (on macOS it needs macFUSE) and its wimlib
+(Add `qemu` for installing into a VHDX.) Homebrew's ntfs-3g is Linux-only (on macOS it needs macFUSE) and its wimlib
 can't write NTFS, so `build-deps.sh` builds ntfs-3g's library and tools
 (no FUSE driver), wimlib with NTFS-3G support and hivex's Python module into
 `.deps/` in this checkout; delete that to undo. Rerun it if you move the
@@ -57,6 +58,7 @@ bin/wintogo disks
 sudo bin/wintogo create --iso Win11.iso --edition "Windows 11 Pro" --target /dev/sdX \
      --account alice --locale auto
 bin/wintogo create --iso Win11.iso --edition 6 --target test.img     # no root needed
+sudo bin/wintogo create --iso Win11.iso --edition 6 --target /dev/sdX --vhdx
 ```
 
 On macOS drives are `/dev/diskN` (`bin/wintogo disks` lists USB ones).
@@ -78,6 +80,14 @@ Options that include a password go in a JSON file (`--config opts.json`, or
    is created, the answer file deletes itself at first logon.
 5. Populates the ESP the way `bcdboot /f UEFI` does and generates the BCD
    store itself (`wintogo/core/bcd.py`; byte-identical to bcdboot's elements).
+
+With `--vhdx` (in the GUI, "Install into a virtual disk file"), Windows goes
+into `\windows.vhdx` on the NTFS partition instead, and the BCD boots the
+file (native VHD boot, as bcdboot sets it up from an attached VHDX). The
+virtual disk is a dynamic VHDX nearly as large as the partition, holding one
+NTFS partition; Windows is told not to expand it to full size at boot. It is
+built in the work directory first (about twice the installed size; on Linux
+`/var/tmp` for a drive, `--workdir` moves it), then copied onto the drive.
 
 Nothing is mounted during the build; desktop automounting of the target is
 suppressed while it is written.

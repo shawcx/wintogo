@@ -4,7 +4,10 @@ The objects and elements below reproduce what `bcdboot <win> /s <esp> /f UEFI`
 writes for a GPT disk (verified against a store created by bcdboot for the
 same disk). Everything is fixed except the two partition devices, which are
 derived from GPT GUIDs chosen when partitioning, and the loader/resume object
-IDs, which are random per install.
+IDs, which are random per install. When Windows is in a VHDX, bcdboot writes
+the same store except that the loader and resume objects' devices are a
+partition inside the virtual disk (verified the same way, with the VHDX
+attached in WinPE).
 """
 
 import struct
@@ -34,20 +37,56 @@ TYPE_INHERIT_RESUME = 0x20200004
 REG_SZ, REG_BINARY, REG_DWORD, REG_MULTI_SZ = 1, 3, 4, 7
 
 
+# Device types in a device element's header.
+DEVICE_BLOCK_IO = 0
+DEVICE_PARTITION = 6       # extended form, identified by GUIDs
+# Kinds of block I/O device, and the value that marks a partition's disk as
+# the virtual disk in its parent device.
+BLOCK_IO_FILE = 5
+DISK_VIRTUAL = 6
+
+
+def _device(device_type, body):
+    """A device: header (type, flags 0, length including the header, reserved 0), body."""
+    return struct.pack("<IIII", device_type, 0, 16 + len(body), 0) + body
+
+
+def _guid(value):
+    # Windows' mixed-endian byte order.
+    return uuid.UUID(str(value)).bytes_le
+
+
+def _gpt_partition(partition_guid, disk_guid, parent=None):
+    """A partition on a GPT disk: the partition's unique GUID, the disk kind,
+    partition style 0 (GPT), the disk GUID, then the device the disk is in
+    (an empty header for a physical disk)."""
+    return _device(DEVICE_PARTITION,
+                   _guid(partition_guid)
+                   + struct.pack("<II", DISK_VIRTUAL if parent else 0, 0)
+                   + _guid(disk_guid)
+                   + (parent or bytes(16)))
+
+
 def partition_device(partition_guid, disk_guid):
     """The binary device element for a partition on a GPT disk.
 
-    Layout: a zero "additional options" GUID; a header of device type 6
-    (partition, extended form), flags 0, length 0x48, reserved 0; the
-    partition's unique GUID; 8 zero bytes; the disk GUID; 16 zero bytes.
-    GUIDs are in Windows' mixed-endian byte order.
+    A zero "additional options" GUID, then the partition: 88 bytes in all.
     """
-    return (bytes(16)
-            + struct.pack("<IIII", 6, 0, 0x48, 0)
-            + uuid.UUID(str(partition_guid)).bytes_le
-            + bytes(8)
-            + uuid.UUID(str(disk_guid)).bytes_le
-            + bytes(16))
+    return bytes(16) + _gpt_partition(partition_guid, disk_guid)
+
+
+def vhd_device(partition_guid, disk_guid, host_partition_guid, host_disk_guid, path):
+    """The device element for a partition inside a virtual disk file.
+
+    This is what bcdedit shows as vhd=[X:]\\path: the partition in the VHD,
+    whose disk is a block I/O device of the file kind, which holds a
+    version (1), its length, the kind again, the host partition the file is
+    on and the file's path.
+    """
+    file = _gpt_partition(host_partition_guid, host_disk_guid) + (path + "\0").encode("utf-16-le")
+    file = struct.pack("<III", 1, 12 + len(file), BLOCK_IO_FILE) + file
+    disk = _device(DEVICE_BLOCK_IO, struct.pack("<I", BLOCK_IO_FILE) + file)
+    return bytes(16) + _gpt_partition(partition_guid, disk_guid, parent=disk)
 
 
 # Element values are tagged with how they are stored in the hive.
@@ -59,12 +98,15 @@ def _bin(b): return (REG_BINARY, b)
 
 
 def build_objects(*, esp_part_guid, win_part_guid, disk_guid, description,
-                  locale="en-us", loader_id=None, resume_id=None):
-    """Return {object id: (object type, {element id: (reg type, value)})}."""
+                  locale="en-us", loader_id=None, resume_id=None, win_device=None):
+    """Return {object id: (object type, {element id: (reg type, value)})}.
+
+    win_device replaces the Windows partition's device, e.g. with vhd_device().
+    """
     loader_id = loader_id or "{%s}" % uuid.uuid4()
     resume_id = resume_id or "{%s}" % uuid.uuid4()
     esp = _bin(partition_device(esp_part_guid, disk_guid))
-    win = _bin(partition_device(win_part_guid, disk_guid))
+    win = _bin(win_device or partition_device(win_part_guid, disk_guid))
     allowed_in_memory = _bin(struct.pack("<Q", 0x15000075))
 
     return {
