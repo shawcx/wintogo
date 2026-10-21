@@ -9,8 +9,10 @@ been tried. It rewrites the whole target drive, so check `--target` twice.
 
 ## Install
 
-On Debian, Ubuntu and derivatives, build the package and install it, which
-pulls in everything it needs:
+On Debian, Ubuntu and derivatives, download the `.deb` from the
+[latest release](https://github.com/shawcx/wintogo/releases/latest) and
+`sudo apt install ./wintogo_*_all.deb`, which pulls in everything it needs.
+Or build the package yourself:
 
 ```
 sudo apt install debhelper dh-python     # once, to build
