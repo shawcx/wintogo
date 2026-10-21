@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Windows To Go
+Comment=Install Windows onto a USB drive
+Exec=wintogo-gui %f
+Icon=io.github.wintogo
+Terminal=false
+Categories=System;
+MimeType=application/x-cd-image;application/x-iso9660-image;
+Keywords=windows;usb;wintogo;rufus;

@@ -1,0 +1,27 @@
+Source: wintogo
+Section: admin
+Priority: optional
+Maintainer: Matthew Shaw <mshaw.cx@gmail.com>
+Build-Depends: debhelper-compat (= 13), dh-sequence-python3, python3
+Standards-Version: 4.6.2
+Homepage: https://github.com/shawcx/wintogo
+Rules-Requires-Root: no
+
+Package: wintogo
+Architecture: all
+Depends: ${misc:Depends}, ${python3:Depends},
+         python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, python3-hivex,
+         wimtools, ntfs-3g, gdisk, dosfstools, mtools, 7zip | p7zip-full,
+         pkexec | policykit-1
+Recommends: qemu-utils
+Suggests: qemu-system-x86, ovmf
+Description: install Windows To Go onto a USB drive from Linux
+ Applies a Windows 10 or 11 edition from an ISO onto a USB drive (or a
+ disk image file) so that it boots on any UEFI PC, Secure Boot included,
+ without a Windows machine or VM. It partitions the drive, applies the
+ image with wimlib, edits the offline registry and answer file for
+ first-time setup, and writes the boot files and BCD store itself.
+ .
+ Windows can also be installed into a VHDX file on the drive and booted
+ from there (needs qemu-utils). wintogo-vm boots a drive or image in QEMU
+ for testing (needs qemu-system-x86 and ovmf).

@@ -1,0 +1,17 @@
+#!/usr/bin/make -f
+#
+# The program lives in /usr/share/wintogo as in a source checkout (bin/ next
+# to the wintogo package), which is where the GUI finds the backend and what
+# the polkit policy names; /usr/bin has links to the launchers.
+
+%:
+	dh $@
+
+override_dh_auto_test:
+	python3 -m unittest discover -s tests
+
+override_dh_install:
+	dh_install -X__pycache__
+
+override_dh_python3:
+	dh_python3 /usr/share/wintogo

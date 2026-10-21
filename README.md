@@ -7,29 +7,47 @@ from Linux or macOS. No Windows machine or VM needed.
 Secure Boot), not yet on a range of real PCs, and only Pro editions have
 been tried. It rewrites the whole target drive, so check `--target` twice.
 
-## Requirements
+## Install
+
+On Debian, Ubuntu and derivatives, build the package and install it, which
+pulls in everything it needs:
+
+```
+sudo apt install debhelper dh-python     # once, to build
+dpkg-buildpackage -b -us -uc
+sudo apt install ../wintogo_0.1.0_all.deb
+```
+
+That adds `wintogo`, `wintogo-gui` and `wintogo-vm` to `/usr/bin`, "Windows
+To Go" to the applications menu, and a polkit policy so the password prompt
+says what it's for. Installing into a VHDX needs `qemu-utils`, which apt
+installs by default as a recommendation.
+
+To run from the checkout instead, install the dependencies and use the
+programs in `bin/`:
 
 ```
 sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 python3-hivex \
-                 wimtools ntfs-3g gdisk dosfstools mtools 7zip
+                 wimtools ntfs-3g gdisk dosfstools mtools 7zip qemu-utils
 ```
 
-(`7zip` is called `p7zip-full` on older releases.) Installing into a VHDX
-also needs `qemu-utils`.
+(`7zip` is called `p7zip-full` on older releases.)
 
-On macOS:
+On macOS, run it from the checkout:
 
 ```
 brew install gptfdisk dosfstools mtools autoconf automake libtool \
              gtk4 libadwaita pygobject3 adwaita-icon-theme
 macos/build-deps.sh
+macos/install-app.sh     # optional: add the app to ~/Applications
 ```
 
 (Add `qemu` for installing into a VHDX.) Homebrew's ntfs-3g is Linux-only
-(on macOS it needs macFUSE) and its wimlib can't write NTFS, so `build-deps.sh` builds ntfs-3g's library and tools
-(no FUSE driver), wimlib with NTFS-3G support and hivex's Python module into
-`.deps/` in this checkout; delete that to undo. Rerun it if you move the
-checkout or Homebrew's `python3` changes version.
+(on macOS it needs macFUSE) and its wimlib can't write NTFS, so
+`build-deps.sh` builds ntfs-3g's library and tools (no FUSE driver), wimlib
+with NTFS-3G support and hivex's Python module into `.deps/` in this
+checkout; delete that to undo. Rerun it if you move the checkout or
+Homebrew's `python3` changes version.
 
 Target machines must boot in UEFI mode; Secure Boot can stay on.
 
@@ -39,33 +57,30 @@ slowly from them.
 ## GUI
 
 ```
-bin/wintogo-gui [windows.iso]
-./install.sh           # optional: add it to the applications menu
-sudo ./install.sh      # optional: nicer password prompt (polkit policy)
+wintogo-gui [windows.iso]
 ```
-
-On macOS, `./install.sh` adds the app to `~/Applications` instead.
 
 Choose the ISO, edition and USB drive, adjust the first-time setup options,
 and press Install. Writing to a drive asks for your password (pkexec; on
-macOS, sudo with a password dialog). The
-"Create a disk image file instead" switch builds a raw image without root,
-e.g. for testing in QEMU.
+macOS, sudo with a password dialog). The "Create a disk image file instead"
+switch builds a raw image without root, e.g. for testing in QEMU.
 
 The last run's log is kept in `~/.cache/wintogo/last-run.log`.
 
 ## Command line
 
 ```
-bin/wintogo editions Win11.iso
-bin/wintogo disks
-sudo bin/wintogo create --iso Win11.iso --edition "Windows 11 Pro" --target /dev/sdX \
+wintogo editions Win11.iso
+wintogo disks
+sudo wintogo create --iso Win11.iso --edition "Windows 11 Pro" --target /dev/sdX \
      --account alice --locale auto
-bin/wintogo create --iso Win11.iso --edition 6 --target test.img     # no root needed
-sudo bin/wintogo create --iso Win11.iso --edition 6 --target /dev/sdX --vhdx
+wintogo create --iso Win11.iso --edition 6 --target test.img     # no root needed
+sudo wintogo create --iso Win11.iso --edition 6 --target /dev/sdX --vhdx
 ```
 
-On macOS drives are `/dev/diskN` (`bin/wintogo disks` lists USB ones).
+From a checkout (and on macOS) the programs are `bin/wintogo`,
+`bin/wintogo-gui` and `bin/wintogo-vm`. On macOS drives are `/dev/diskN`
+(`bin/wintogo disks` lists USB ones).
 
 Options that include a password go in a JSON file (`--config opts.json`, or
 `--config -` for stdin), using the field names of `customize.Options`.
@@ -104,8 +119,8 @@ device in one pass with the drive unmounted, and ejected.
 ## Testing a drive in QEMU
 
 ```
-bin/wintogo-vm test.img          # an image built with "Create a disk image file instead"
-sudo bin/wintogo-vm /dev/sdX     # a real drive (unmount it first)
+wintogo-vm test.img          # an image built with "Create a disk image file instead"
+sudo wintogo-vm /dev/sdX     # a real drive (unmount it first)
 ```
 
 The disk is attached as a USB drive with Secure Boot on (needs `qemu-system-x86`
@@ -121,8 +136,8 @@ Devices are emulated hardware Windows has drivers for. For speed, once the
 are installed in the guest:
 
 ```
-bin/wintogo-vm --virtio test.img                  # virtio display/net/input/balloon/RNG
-bin/wintogo-vm --virtio --disk virtio test.img    # ...and the Windows disk on virtio-blk
+wintogo-vm --virtio test.img                  # virtio display/net/input/balloon/RNG
+wintogo-vm --virtio --disk virtio test.img    # ...and the Windows disk on virtio-blk
 ```
 
 `--virtio` attaches the driver ISO as a CD if it's in `~/Downloads` (or pass

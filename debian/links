@@ -1,0 +1,3 @@
+usr/share/wintogo/bin/wintogo usr/bin/wintogo
+usr/share/wintogo/bin/wintogo-gui usr/bin/wintogo-gui
+usr/share/wintogo/bin/wintogo-vm usr/bin/wintogo-vm

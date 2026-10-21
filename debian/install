@@ -1,0 +1,7 @@
+bin/wintogo usr/share/wintogo/bin
+bin/wintogo-gui usr/share/wintogo/bin
+bin/wintogo-vm usr/share/wintogo/bin
+wintogo usr/share/wintogo
+data/icons/hicolor usr/share/icons
+data/io.github.wintogo.desktop usr/share/applications
+data/io.github.wintogo.policy usr/share/polkit-1/actions
