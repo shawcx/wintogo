@@ -86,7 +86,7 @@ def cmd_create(args):
     try:
         pipeline.create(args.iso, args.edition, args.target, reporter,
                         options=options, image_size=size, workdir=args.workdir,
-                        allow_non_usb=args.allow_non_usb)
+                        allow_non_usb=args.allow_non_usb, vhdx=args.vhdx)
     except WinToGoError as e:
         if args.json:
             reporter.error(str(e))
@@ -120,6 +120,9 @@ def main(argv=None):
     p.add_argument("--edition", required=True, help="edition index or exact name")
     p.add_argument("--target", required=True,
                    help=f"whole-disk device (e.g. {'/dev/disk4' if IS_MACOS else '/dev/sdb'}) or image file")
+    p.add_argument("--vhdx", action="store_true",
+                   help="install Windows into a virtual disk file (\\windows.vhdx) on the drive "
+                        "and boot that")
     p.add_argument("--size", type=float, help="image file size in GiB (default: just big enough)")
     p.add_argument("--workdir", help="where to put temporary files")
     p.add_argument("--allow-non-usb", action="store_true", help="allow a target that isn't a USB disk")

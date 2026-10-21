@@ -15,7 +15,7 @@ from .util import run
 SKIP = {"boot.pnd.stl"}
 
 
-def install(wim_path, edition, target, workdir, reporter):
+def install(wim_path, edition, target, workdir, reporter, vdisk=None):
     src = Path(workdir) / "winboot"
     shutil.rmtree(src, ignore_errors=True)
     src.mkdir(parents=True)
@@ -36,12 +36,18 @@ def install(wim_path, edition, target, workdir, reporter):
     shutil.copy2(boot_dir / "bootmgfw.efi", stage / "EFI" / "Boot" / "bootx64.efi")
 
     layout = target.layout
+    win_device = None
+    if vdisk:
+        # Windows is in the virtual disk file on the drive's Windows partition.
+        win_device = bcd.vhd_device(vdisk.win_guid, vdisk.disk_guid,
+                                    layout.win_guid, layout.disk_guid, "\\" + vdisk.file_name)
     objects = bcd.build_objects(
         esp_part_guid=layout.esp_guid,
         win_part_guid=layout.win_guid,
         disk_guid=layout.disk_guid,
         description="Windows 11" if edition.is_windows_11 else "Windows 10",
         locale=edition.language.lower(),
+        win_device=win_device,
     )
     base = src / "BCD-Template"
     bcd.write_store(base, boot_dir / "BCD", objects)

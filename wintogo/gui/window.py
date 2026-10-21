@@ -44,11 +44,20 @@ STEP_WEIGHTS = {"source": 3, "partition": 2, "apply": 82, "customize": 3, "boot"
 # On macOS a drive is built in a file, then written out in a "write" step.
 STAGED_STEP_WEIGHTS = {"source": 2, "partition": 1, "apply": 46, "customize": 2, "boot": 1,
                        "finish": 0, "write": 48}
+# With a virtual disk, Windows is applied to a local file, which is quick;
+# copying the finished VHDX is what writes to the drive.
+VHDX_STEP_WEIGHTS = {"source": 3, "partition": 2, "apply": 40, "customize": 2, "boot": 1,
+                     "vhdx": 10, "copy": 37, "finish": 5}
+STAGED_VHDX_STEP_WEIGHTS = {"source": 2, "partition": 1, "apply": 30, "customize": 1, "boot": 1,
+                            "vhdx": 7, "copy": 13, "finish": 0, "write": 45}
+# qemu-img is only needed for a virtual disk, so it isn't in DEPENDENCIES.
+QEMU_IMG_INSTALL = "brew install qemu" if IS_MACOS else "sudo apt install qemu-utils"
 # What the progress page lists before the backend reports each step (it
 # uses the same words; "apply" names the edition).
 STEP_LABELS = {"source": "Reading the Windows image", "partition": "Partitioning and formatting",
                "apply": "Installing Windows", "customize": "Configuring Windows",
-               "boot": "Installing boot files", "finish": "Finishing",
+               "boot": "Installing boot files", "vhdx": "Building the virtual disk",
+               "copy": "Copying the virtual disk into place", "finish": "Finishing",
                "write": "Writing to the drive"}
 # Steps this big show their own percentage as well.
 STEP_PERCENT_WEIGHT = 10
@@ -377,13 +386,20 @@ class MainWindow(Adw.ApplicationWindow):
         for row in (self.disks_switch, self.bitlocker_switch, self.hibernate_switch):
             self.wtg_row.add_row(row)
 
+        self.vhdx_switch = Adw.SwitchRow(
+            title="Install into a virtual disk file",
+            subtitle="Windows lives in windows.vhdx on the drive, so it's one file "
+                     "to back up or swap")
+        self.vhdx_switch.add_prefix(Gtk.Image(icon_name="drive-harddisk-symbolic"))
+
         for switch in (self.online_switch, self.privacy_switch, self.region_switch,
-                       self.disks_switch, self.bitlocker_switch, self.hibernate_switch):
+                       self.disks_switch, self.bitlocker_switch, self.hibernate_switch,
+                       self.vhdx_switch):
             switch.connect("notify::active", lambda *_: self.update_state())
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         box.append(heading)
-        box.append(_boxed_list(self.setup_row, self.wtg_row))
+        box.append(_boxed_list(self.setup_row, self.wtg_row, self.vhdx_switch))
         return box
 
     def _build_progress(self):
@@ -517,14 +533,19 @@ class MainWindow(Adw.ApplicationWindow):
                 return "Choose where to save the image", ""
         elif not self.disk:
             return "Plug in a USB drive", "It shows up here when you do"
-        elif self.disk.size < pipeline.required_bytes(self.edition):
-            need = disks.human_size(pipeline.required_bytes(self.edition))
+        elif self.disk.size < self._required_bytes(self.edition):
+            need = disks.human_size(self._required_bytes(self.edition))
             return "This drive is too small", f"{self.edition.name} needs at least {need}"
+        if self.vhdx_switch.get_active() and shutil.which("qemu-img") is None:
+            return "A virtual disk needs qemu-img", f"Install it with: {QEMU_IMG_INSTALL}"
         try:
             self._options().validate()
         except WinToGoError as e:
             return _sentence(str(e)), "Change it under First-time setup"
         return None
+
+    def _required_bytes(self, edition):
+        return pipeline.required_bytes(edition, self.vhdx_switch.get_active())
 
     def _target_name(self):
         if self.image_switch.get_active():
@@ -612,8 +633,8 @@ class MainWindow(Adw.ApplicationWindow):
         disk, edition = self.disk, self.edition
         if disk is None:
             return None
-        if edition and disk.size < pipeline.required_bytes(edition):
-            need = disks.human_size(pipeline.required_bytes(edition))
+        if edition and disk.size < self._required_bytes(edition):
+            need = disks.human_size(self._required_bytes(edition))
             return f"Too small: {edition.name} needs at least {need}", True
         if disk.size < pipeline.RECOMMENDED_MIN:
             return "Little room left for apps and files; 64 GB or more is recommended", False
@@ -821,10 +842,14 @@ class MainWindow(Adw.ApplicationWindow):
         if not image_mode and self.disk.mountpoints:
             if not self._unmount(self.disk):
                 return
-        self._weights = STAGED_STEP_WEIGHTS if IS_MACOS and not image_mode else STEP_WEIGHTS
+        vhdx = self.vhdx_switch.get_active()
+        staged = IS_MACOS and not image_mode
+        self._weights = {(False, False): STEP_WEIGHTS, (True, False): STAGED_STEP_WEIGHTS,
+                         (False, True): VHDX_STEP_WEIGHTS,
+                         (True, True): STAGED_VHDX_STEP_WEIGHTS}[staged, vhdx]
         self._show_progress_page(image_mode)
         self.job = Job(iso=self.iso_path, edition_index=self.edition.index, target=target,
-                       as_root=not image_mode, options=self._options().__dict__,
+                       vhdx=vhdx, as_root=not image_mode, options=self._options().__dict__,
                        on_event=self._on_event, on_exit=self._on_exit, log_path=log_path())
 
     def _show_progress_page(self, image_mode):
@@ -832,7 +857,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.run_icon.set_from_icon_name(
             "document-save-symbolic" if image_mode else "drive-removable-media-symbolic")
         self.run_title.set_text(f"{self.edition.name} → {name}")
-        self.run_detail.set_text(" · ".join([self._setup_summary()] + self._wtg_parts()))
+        vhdx = ["in windows.vhdx"] if self.vhdx_switch.get_active() else []
+        self.run_detail.set_text(" · ".join([self._setup_summary()] + self._wtg_parts() + vhdx))
 
         while child := self.steps_box.get_first_child():
             self.steps_box.remove(child)

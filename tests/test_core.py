@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from wintogo.core import bcd, customize, disks, iso, pipeline, target, wim  # noqa: E402
+from wintogo.core import bcd, customize, disks, iso, pipeline, target, vhdx, wim  # noqa: E402
 from wintogo.core.util import Reporter, WinToGoError, setup_environment  # noqa: E402
 
 setup_environment()  # macOS: find Homebrew's and .deps/'s tools
@@ -39,9 +39,36 @@ class BcdTests(unittest.TestCase):
     WIN_DEVICE = ("00000000000000000000000000000000060000000000000048000000000000"
                   "00f4ee87b54bec1d4dbc5a0da1a45f6d180000000000000000358ad33c7cef72"
                   "4784c50f84c66ad99300000000000000000000000000000000")
+    VHD_DEVICE = ("000000000000000000000000000000000600000000000000bc000000000000002ad36446"
+                  "2fd80147968b0dd0776d964d06000000000000004c7cc05c469b9d43931afe430f6ba34d"
+                  "00000000000000008400000000000000050000000100000070000000050000000600"
+                  "0000000000004800000000000000cadf7618f8f9b1499f5b5d40ad48d5bd00000000"
+                  "000000006155fb5c21762f4d908412a14de794ff0000000000000000000000000000"
+                  "00005c00770069006e0064006f00770073002e0076006800640078000000")
 
     def test_partition_device_matches_bcdboot(self):
         self.assertEqual(bcd.partition_device(self.WIN, self.DISK).hex(), self.WIN_DEVICE)
+
+    def test_vhd_device_matches_bcdboot(self):
+        # bcdboot run from a VHDX attached in WinPE: \windows.vhdx on the
+        # host partition, Windows in the VHDX's first partition.
+        device = bcd.vhd_device("4664D32A-D82F-4701-968B-0DD0776D964D",
+                                "5CC07C4C-9B46-439D-931A-FE430F6BA34D",
+                                "1876DFCA-F9F8-49B1-9F5B-5D40AD48D5BD",
+                                "5CFB5561-7621-4D2F-9084-12A14DE794FF", r"\windows.vhdx")
+        self.assertEqual(device.hex(), self.VHD_DEVICE)
+
+    def test_vhd_device_in_loader_and_resume(self):
+        win = bcd.vhd_device(self.WIN, self.DISK, self.WIN, self.DISK, r"\windows.vhdx")
+        objs = bcd.build_objects(esp_part_guid=self.WIN, win_part_guid=self.WIN,
+                                 disk_guid=self.DISK, description="Windows 11", win_device=win)
+        bootmgr = objs[bcd.BOOTMGR][1]
+        loader = objs[bootmgr[0x23000003][1]][1]
+        resume = objs[bootmgr[0x23000006][1]][1]
+        self.assertEqual(loader[0x11000001][1], win)
+        self.assertEqual(loader[0x21000001][1], win)
+        self.assertEqual(resume[0x11000001][1], win)
+        self.assertEqual(len(bootmgr[0x11000001][1]), 88)
 
     def test_objects_reference_each_other(self):
         objs = bcd.build_objects(esp_part_guid=self.WIN, win_part_guid=self.WIN,
@@ -169,6 +196,60 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(pipeline.pick_edition(editions, "windows 11 home").index, 1)
         with self.assertRaises(WinToGoError):
             pipeline.pick_edition(editions, "7")
+
+
+class VhdxTests(unittest.TestCase):
+    def test_sizes(self):
+        gib = vhdx.GIB
+        self.assertEqual(vhdx.virtual_size(40 * gib), 39 * gib)
+        self.assertEqual(vhdx.virtual_size(500 * gib), 495 * gib)
+        self.assertEqual(vhdx.apply_size(10 * gib), 12 * gib)
+        edition = wim.parse_editions(SAMPLE_XML)[0]
+        self.assertEqual(pipeline.required_bytes(edition, vhdx=True),
+                         pipeline.required_bytes(edition) + vhdx.OVERHEAD)
+
+    @unittest.skipUnless(all(shutil.which(c) for c in ("sgdisk", "mkntfs", "ntfscp", "ntfscat",
+                                                       "ntfsresize", "ntfsfix", "qemu-img")),
+                         "needs gdisk, ntfs-3g and qemu-img")
+    def test_build_and_copy(self):
+        with tempfile.TemporaryDirectory() as d:
+            disk = vhdx.VirtualDisk(512 << 20, d)
+            disk.create(64 << 20)
+            self.assertEqual(os.path.getsize(disk.windows_volume), 64 << 20)
+            payload = Path(d) / "payload"
+            payload.write_bytes(os.urandom(1 << 20))
+            subprocess.run(["ntfscp", "-q", disk.windows_volume, payload, "/payload"], check=True)
+            disk.build(Reporter(io.StringIO()))
+            self.assertLess(disk.path.stat().st_size, 100 << 20, "the VHDX should stay small")
+
+            host = Path(d) / "host"
+            with open(host, "wb") as f:
+                f.truncate(1 << 30)
+            subprocess.run(["mkntfs", "-q", "-F", "-Q", str(host)], check=True, capture_output=True)
+            disk.copy_to(str(host), Reporter(io.StringIO()))
+            self.assertFalse(disk.path.exists())
+
+            # Read it back: the GPT has our GUIDs, the volume fills its
+            # partition, is clean, and holds the file.
+            vhd, raw = Path(d) / "back.vhdx", Path(d) / "back.raw"
+            with open(vhd, "wb") as f:
+                subprocess.run(["ntfscat", str(host), "/windows.vhdx"], stdout=f, check=True)
+            subprocess.run(["qemu-img", "convert", "-f", "vhdx", "-O", "raw", vhd, raw], check=True)
+            info = subprocess.run(["sgdisk", "-p", "-i", "1", str(raw)], capture_output=True,
+                                  text=True).stdout
+            self.assertIn(disk.disk_guid, info)
+            self.assertIn(disk.win_guid, info)
+            part = Path(d) / "part"
+            with open(raw, "rb") as fin, open(part, "wb") as fout:
+                fin.seek(vhdx.PARTITION_START * 512)
+                fout.write(fin.read())
+            out = subprocess.run(["ntfscat", str(part), "/payload"], capture_output=True)
+            self.assertEqual(out.stdout, payload.read_bytes())
+            out = subprocess.run(["ntfsinfo", "-m", str(part)], capture_output=True, text=True).stdout
+            self.assertIn("Volume Flags: 0x0000", out)
+            clusters = int(next(line.split()[-1] for line in out.splitlines()
+                                if "Volume Size in Clusters" in line))
+            self.assertGreater(clusters * 4096, 500 << 20)
 
 
 class IsoTests(unittest.TestCase):

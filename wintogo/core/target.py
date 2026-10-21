@@ -89,7 +89,7 @@ class Target:
         """Path to hand to mkntfs/wimlib for the Windows partition."""
         raise NotImplementedError
 
-    def format_windows(self):
+    def format_windows(self, label="Windows"):
         raise NotImplementedError
 
     def finish(self, reporter):
@@ -160,8 +160,8 @@ class DeviceTarget(Target):
     def windows_volume(self):
         return self._parts[2]
 
-    def format_windows(self):
-        run(["mkntfs", "--quick", "--label", "Windows", self._parts[2]])
+    def format_windows(self, label="Windows"):
+        run(["mkntfs", "--quick", "--label", label, self._parts[2]])
 
     def finish(self, reporter):
         reporter.log("flushing writes to the drive (this can take a while)")
@@ -202,14 +202,14 @@ class ImageTarget(Target):
     def windows_volume(self):
         return str(self._win_file)
 
-    def format_windows(self):
+    def format_windows(self, label="Windows"):
         start, count = self.layout.extents[3]
         self._win_file.unlink(missing_ok=True)
         with open(self._win_file, "wb") as f:
             f.truncate(count * SECTOR)
         # -p/-H/-S fill in the boot sector geometry; -p must match the real
         # start sector or Windows won't mount the volume.
-        run(["mkntfs", "--quick", "--force", "--label", "Windows", "--sector-size", "512",
+        run(["mkntfs", "--quick", "--force", "--label", label, "--sector-size", "512",
              "--partition-start", str(start), "--heads", "255", "--sectors-per-track", "63",
              self._win_file])
 

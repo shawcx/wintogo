@@ -1,4 +1,8 @@
-"""The create pipeline: ISO + edition -> bootable Windows To Go drive or image."""
+"""The create pipeline: ISO + edition -> bootable Windows To Go drive or image.
+
+With vhdx=True, Windows goes into a virtual disk file on the drive instead
+of straight onto its NTFS partition (see vhdx.py).
+"""
 
 import os
 import shutil
@@ -6,8 +10,8 @@ import stat
 import tempfile
 from pathlib import Path
 
-from . import bootfiles, customize, disks, iso, wim
-from .target import ESP_MIB, MIB, MSR_MIB, DeviceTarget, ImageTarget, StagedDeviceTarget
+from . import bootfiles, customize, disks, iso, vhdx as vhdx_mod, wim
+from .target import ESP_MIB, MIB, MSR_MIB, SECTOR, DeviceTarget, ImageTarget, StagedDeviceTarget
 from .util import IS_MACOS, WinToGoError, require
 
 GIB = 1 << 30
@@ -45,14 +49,17 @@ def pick_edition(editions, choice):
     raise WinToGoError(f"no edition {choice!r} in this ISO; available:\n{names}")
 
 
-def required_bytes(edition):
-    return (ESP_MIB + MSR_MIB + 2) * MIB + edition.installed_bytes + HEADROOM
+def required_bytes(edition, vhdx=False):
+    need = (ESP_MIB + MSR_MIB + 2) * MIB + edition.installed_bytes + HEADROOM
+    return need + vhdx_mod.OVERHEAD if vhdx else need
 
 
-def _check_staging_space(work, edition):
+def _check_staging_space(work, edition, vhdx=False):
     # The drive is built in a sparse file first, which grows to about the
-    # size of the installed files.
+    # size of the installed files; a virtual disk is built before that.
     need = edition.installed_bytes + 2 * GIB
+    if vhdx:
+        need += vhdx_mod.staging_bytes(edition.installed_bytes)
     free = shutil.disk_usage(work).free
     if free < need:
         raise WinToGoError(f"the drive is assembled in {work.parent} first, which needs "
@@ -61,8 +68,8 @@ def _check_staging_space(work, edition):
 
 
 def create(iso_path, edition_choice, output, reporter, *, options=None,
-           image_size=None, workdir=None, allow_non_usb=False):
-    require(*REQUIRED_COMMANDS)
+           image_size=None, workdir=None, allow_non_usb=False, vhdx=False):
+    require(*REQUIRED_COMMANDS, *(vhdx_mod.REQUIRED_COMMANDS if vhdx else ()))
     options = options or customize.Options()
     options.validate()
     os.environ["MTOOLS_SKIP_CHECK"] = "1"
@@ -83,13 +90,13 @@ def create(iso_path, edition_choice, output, reporter, *, options=None,
         # partition, so work next to the output rather than in a tmpfs /tmp.
         base = workdir or Path(output).resolve().parent
     work = Path(tempfile.mkdtemp(prefix="wintogo.", dir=base))
-    target = None
+    target = vdisk = None
 
     try:
         reporter.step("source", "Reading the Windows image")
         with iso.open_install_image(iso_path, work, reporter) as wim_path:
             edition = pick_edition(wim.read_editions(wim_path), edition_choice)
-            need = required_bytes(edition)
+            need = required_bytes(edition, vhdx)
             reporter.log(f"{edition.name}, build {edition.build}, "
                          f"{edition.installed_bytes / GIB:.1f} GiB of files")
 
@@ -101,30 +108,51 @@ def create(iso_path, edition_choice, output, reporter, *, options=None,
                     reporter.warning(f"{disks.human_size(disk.size)} leaves little free space; "
                                      "64 GB or more is recommended")
                 if IS_MACOS:
-                    _check_staging_space(work, edition)
+                    _check_staging_space(work, edition, vhdx)
                     target = StagedDeviceTarget(disk, work)
                 else:
+                    if vhdx:
+                        vhdx_mod.check_space(work, edition.installed_bytes)
                     target = DeviceTarget(output)
             else:
                 size = image_size or need
                 if size < need:
                     raise WinToGoError(f"image size {size / GIB:.1f} GiB is too small; "
                                        f"need at least {need / GIB:.1f} GiB")
+                if vhdx:
+                    vhdx_mod.check_space(work, edition.installed_bytes)
                 target = ImageTarget(output, size, work)
 
             reporter.step("partition", "Partitioning and formatting")
             target.partition()
             target.format_esp()
-            target.format_windows()
+            # With a virtual disk, Windows' own C: is also labelled Windows.
+            target.format_windows(label=vhdx_mod.HOST_LABEL if vhdx else "Windows")
+            windows_volume = target.windows_volume
+            if vhdx:
+                _, host_sectors = target.layout.extents[3]
+                vdisk = vhdx_mod.VirtualDisk(vhdx_mod.virtual_size(host_sectors * SECTOR), work)
+                reporter.log(f"creating a {disks.human_size(vdisk.size_bytes)} virtual disk, "
+                             f"\\{vhdx_mod.FILE_NAME}")
+                vdisk.create(vhdx_mod.apply_size(edition.installed_bytes))
+                windows_volume = vdisk.windows_volume
 
             reporter.step("apply", f"Installing {edition.name}")
-            wim.apply_image(wim_path, edition.index, target.windows_volume, reporter)
+            wim.apply_image(wim_path, edition.index, windows_volume, reporter)
 
             reporter.step("customize", "Configuring Windows")
-            customize.apply(target.windows_volume, edition, options, work, reporter)
+            customize.apply(windows_volume, edition, options, work, reporter)
+            if vdisk:
+                customize.prepare_vhd_boot(windows_volume, work, reporter)
 
             reporter.step("boot", "Installing boot files")
-            bootfiles.install(wim_path, edition, target, work, reporter)
+            bootfiles.install(wim_path, edition, target, work, reporter, vdisk=vdisk)
+
+        if vdisk:
+            reporter.step("vhdx", "Building the virtual disk")
+            vdisk.build(reporter)
+            reporter.step("copy", "Copying the virtual disk into place")
+            vdisk.copy_to(target.windows_volume, reporter)
 
         reporter.step("finish", "Finishing")
         target.finish(reporter)

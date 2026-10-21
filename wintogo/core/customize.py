@@ -141,6 +141,21 @@ def _system_edits(opts, reporter):
     return edit
 
 
+def prepare_vhd_boot(volume, workdir, reporter):
+    """Settings Windows needs to boot from a dynamic VHDX on the drive.
+
+    At boot Windows grows a dynamic virtual disk to its full size unless
+    told not to, which takes as long as writing it out and can fill the
+    drive; with 4 it leaves the file as it is.
+    """
+    def edit(reg):
+        current = reg.get_dword("Select", "Current") or 1
+        reg.set_dword(f"ControlSet{current:03d}\\Services\\FsDepends\\Parameters",
+                      "VirtualDiskExpandOnMount", 4)
+    _edit_hive(volume, SYSTEM_HIVE, workdir, edit)
+    reporter.log("the virtual disk won't be expanded to its full size at boot")
+
+
 def _software_edits(opts, reporter):
     def edit(reg):
         # Lets OOBE continue without a network connection / Microsoft account.
